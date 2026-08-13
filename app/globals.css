@@ -1,0 +1,16 @@
+:root {
+  color-scheme: light dark;
+  --font-geist-sans: Inter, "Noto Sans SC", "Microsoft YaHei", "Malgun Gothic", Arial, sans-serif;
+  --font-geist-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #f4f6f8;
+  font-family: var(--font-geist-sans);
+}
