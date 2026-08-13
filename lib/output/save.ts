@@ -76,6 +76,7 @@ export async function requestSaveDestination(
     return { fileName, handle };
   } catch (error) {
     if (isAbortError(error)) throw new SaveCancelledError();
+    if (isPickerCapabilityError(error)) return { fileName };
     throw error;
   }
 }
@@ -83,15 +84,15 @@ export async function requestSaveDestination(
 export async function saveBlob(
   destination: SaveDestination,
   blob: Blob,
+  signal?: AbortSignal,
 ): Promise<SaveResult> {
+  throwIfAborted(signal);
   if (destination.handle) {
     const writable = await destination.handle.createWritable();
-    const writer = writable.getWriter();
     try {
-      await writer.write(new Uint8Array(await blob.arrayBuffer()));
-      await writer.close();
+      await blob.stream().pipeTo(writable, { signal });
     } catch (error) {
-      await writer.abort(error).catch(() => undefined);
+      await writable.abort(error).catch(() => undefined);
       throw error;
     }
     return {
@@ -114,8 +115,9 @@ export async function saveText(
   destination: SaveDestination,
   text: string,
   mimeType: string,
+  signal?: AbortSignal,
 ): Promise<SaveResult> {
-  return saveBlob(destination, new Blob([text], { type: mimeType }));
+  return saveBlob(destination, new Blob([text], { type: mimeType }), signal);
 }
 
 export interface ZipDestination {
@@ -127,31 +129,50 @@ export interface ZipDestination {
 export async function createZipDestination(
   destination: SaveDestination,
   estimatedBytes: number,
+  estimatedEntries = 1,
+  signal?: AbortSignal,
 ): Promise<ZipDestination> {
+  throwIfAborted(signal);
+  const zip64 = requiresZip64(estimatedBytes, estimatedEntries);
   if (destination.handle) {
     const writable = await destination.handle.createWritable();
-    const writer = new ZipWriter(writable, {
-      zip64: estimatedBytes >= 0xffffffff,
+    const sinkWriter = writable.getWriter();
+    let writtenBytes = 0;
+    const countingSink = new WritableStream<Uint8Array>({
+      async write(chunk) {
+        writtenBytes += chunk.byteLength;
+        await sinkWriter.write(chunk);
+      },
+      async close() {
+        await sinkWriter.close();
+      },
+      async abort(reason) {
+        await sinkWriter.abort(reason);
+      },
+    });
+    const writer = new ZipWriter(countingSink, {
+      zip64,
       useWebWorkers: false,
     });
     let finalized = false;
     return {
       writer,
       async finalize() {
+        throwIfAborted(signal);
         if (!finalized) {
           await writer.close();
           finalized = true;
         }
         return {
           fileName: destination.fileName,
-          size: estimatedBytes,
+          size: writtenBytes,
           mode: "direct",
         };
       },
       async abort(reason) {
         if (finalized) return;
         finalized = true;
-        await writable.abort(reason).catch(() => undefined);
+        await sinkWriter.abort(reason).catch(() => undefined);
       },
     };
   }
@@ -159,13 +180,14 @@ export async function createZipDestination(
   ensureBlobFallbackIsSafe(estimatedBytes);
   const blobWriter = new BlobWriter("application/zip");
   const writer = new ZipWriter(blobWriter, {
-    zip64: estimatedBytes >= 0xffffffff,
+    zip64,
     useWebWorkers: false,
   });
   let finalized = false;
   return {
     writer,
     async finalize() {
+      throwIfAborted(signal);
       if (finalized) {
         throw new Error("ZIP output has already been finalized.");
       }
@@ -183,6 +205,16 @@ export async function createZipDestination(
       finalized = true;
     },
   };
+}
+
+export function requiresZip64(estimatedBytes: number, estimatedEntries: number): boolean {
+  if (!Number.isSafeInteger(estimatedBytes) || estimatedBytes < 0) {
+    throw new RangeError("Estimated ZIP byte count must be a non-negative safe integer.");
+  }
+  if (!Number.isSafeInteger(estimatedEntries) || estimatedEntries < 0) {
+    throw new RangeError("Estimated ZIP entry count must be a non-negative safe integer.");
+  }
+  return estimatedBytes >= 0xffffffff || estimatedEntries >= 0xffff;
 }
 
 export function ensureBlobFallbackIsSafe(bytes: number): void {
@@ -217,4 +249,17 @@ function isAbortError(error: unknown): boolean {
             (error as { name?: unknown }).name === "AbortError",
         )
   );
+}
+
+function isPickerCapabilityError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("name" in error)) return false;
+  const name = (error as { name?: unknown }).name;
+  return name === "SecurityError" || name === "NotAllowedError";
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("The operation was aborted.", "AbortError");
 }

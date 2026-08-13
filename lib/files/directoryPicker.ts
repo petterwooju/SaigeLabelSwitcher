@@ -5,6 +5,28 @@ export interface PickedDirectoryFile {
   relativePath: string;
 }
 
+export interface DirectoryReadOptions {
+  readonly signal?: AbortSignal;
+  readonly maxDepth?: number;
+  readonly maxFiles?: number;
+  readonly maxTotalBytes?: number;
+  readonly includeFile?: (name: string) => boolean;
+}
+
+export const DEFAULT_DIRECTORY_MAX_DEPTH = 32;
+export const DEFAULT_DIRECTORY_MAX_FILES = 20_000;
+export const DEFAULT_DIRECTORY_MAX_TOTAL_BYTES = 32 * 1024 * 1024 * 1024;
+
+export class DirectoryReadError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "DirectoryReadError";
+    this.code = code;
+  }
+}
+
 /** Structural File System Access API types, kept usable in browsers whose DOM
  * declarations do not yet include showDirectoryPicker(). */
 export interface FileHandleLike {
@@ -49,19 +71,28 @@ export function supportsFileSystemDirectoryPicker(
 export async function pickDirectoryFiles(
   candidate: Pick<DirectoryPickerWindow, "showDirectoryPicker">,
   options: DirectoryPickerOptionsLike = { mode: "read" },
+  readOptions: DirectoryReadOptions = {},
 ): Promise<PickedDirectoryFile[]> {
   if (!candidate.showDirectoryPicker) {
     throw new Error("This browser does not support the File System Access API.");
   }
   const root = await candidate.showDirectoryPicker(options);
-  return readDirectoryFiles(root);
+  return readDirectoryFiles(root, readOptions);
 }
 
 export async function readDirectoryFiles(
   root: DirectoryHandleLike,
+  options: DirectoryReadOptions = {},
 ): Promise<PickedDirectoryFile[]> {
   const files: PickedDirectoryFile[] = [];
-  await visitDirectory(root, normalizePath(root.name), files);
+  await visitDirectory(
+    root,
+    normalizePath(root.name),
+    files,
+    { totalBytes: 0 },
+    0,
+    options,
+  );
   return sortPickedFiles(files);
 }
 
@@ -72,11 +103,19 @@ export async function readDirectoryFiles(
  */
 export function readWebkitDirectoryFiles(
   selected: Iterable<File> | ArrayLike<File>,
+  options: DirectoryReadOptions = {},
 ): PickedDirectoryFile[] {
-  const files = Array.from(selected as ArrayLike<File>, (file) => ({
-    file,
-    relativePath: browserRelativePath(file),
-  })).filter((item) => item.relativePath.length > 0);
+  const files: PickedDirectoryFile[] = [];
+  const state = { totalBytes: 0 };
+  throwIfAborted(options.signal);
+  for (const file of Array.from(selected as ArrayLike<File>)) {
+    throwIfAborted(options.signal);
+    const relativePath = browserRelativePath(file);
+    if (!relativePath || (options.includeFile && !options.includeFile(relativePath))) {
+      continue;
+    }
+    appendPickedFile(files, state, file, relativePath, options);
+  }
   return sortPickedFiles(files);
 }
 
@@ -89,16 +128,65 @@ async function visitDirectory(
   directory: DirectoryHandleLike,
   relativeDirectory: string,
   files: PickedDirectoryFile[],
+  state: { totalBytes: number },
+  depth: number,
+  options: DirectoryReadOptions,
 ): Promise<void> {
+  throwIfAborted(options.signal);
+  const maxDepth = options.maxDepth ?? DEFAULT_DIRECTORY_MAX_DEPTH;
+  if (depth > maxDepth) {
+    throw new DirectoryReadError(
+      "DIRECTORY_DEPTH_LIMIT",
+      `所选目录超过最大扫描深度（${maxDepth} 层）。`,
+    );
+  }
   for await (const handle of directory.values()) {
+    throwIfAborted(options.signal);
     const relativePath = normalizePath(
       relativeDirectory ? `${relativeDirectory}/${handle.name}` : handle.name,
     );
     if (handle.kind === "directory") {
-      await visitDirectory(handle, relativePath, files);
+      await visitDirectory(handle, relativePath, files, state, depth + 1, options);
     } else {
-      files.push({ file: await handle.getFile(), relativePath });
+      if (options.includeFile && !options.includeFile(handle.name)) continue;
+      const file = await handle.getFile();
+      throwIfAborted(options.signal);
+      appendPickedFile(files, state, file, relativePath, options);
     }
+  }
+}
+
+function appendPickedFile(
+  files: PickedDirectoryFile[],
+  state: { totalBytes: number },
+  file: File,
+  relativePath: string,
+  options: DirectoryReadOptions,
+): void {
+  const maxFiles = options.maxFiles ?? DEFAULT_DIRECTORY_MAX_FILES;
+  if (files.length >= maxFiles) {
+    throw new DirectoryReadError(
+      "DIRECTORY_FILE_LIMIT",
+      `所选目录包含超过 ${maxFiles} 个候选文件。`,
+    );
+  }
+  state.totalBytes += file.size;
+  const maxTotalBytes =
+    options.maxTotalBytes ?? DEFAULT_DIRECTORY_MAX_TOTAL_BYTES;
+  if (!Number.isSafeInteger(state.totalBytes) || state.totalBytes > maxTotalBytes) {
+    throw new DirectoryReadError(
+      "DIRECTORY_SIZE_LIMIT",
+      `所选目录候选文件总大小超过 ${maxTotalBytes} 字节。`,
+    );
+  }
+  files.push({ file, relativePath });
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException("The operation was aborted.", "AbortError");
   }
 }
 

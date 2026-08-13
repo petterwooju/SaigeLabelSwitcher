@@ -1,10 +1,9 @@
 import {
   BlobReader,
-  BlobWriter,
-  TextWriter,
   ZipReader,
   type FileEntry,
 } from "@zip.js/zip.js";
+import { BROWSER_ARCHIVE_LIMITS } from "../security/resourceLimits.ts";
 
 export interface ArchiveLimits {
   maxEntries: number;
@@ -12,6 +11,9 @@ export interface ArchiveLimits {
   maxTotalBytes: number;
   maxCompressionRatio: number;
   maxTextBytes: number;
+  maxBlobBytes: number;
+  maxEntryNameBytes: number;
+  maxTotalEntryNameBytes: number;
 }
 
 export interface ArchiveEntryInfo {
@@ -26,23 +28,24 @@ export interface OpenArchive {
   readonly totalUncompressedBytes: number;
   has(name: string): boolean;
   names(): string[];
-  readText(name: string, maxBytes?: number): Promise<string>;
-  readBlob(name: string, mimeType?: string): Promise<Blob>;
+  readText(name: string, maxBytes?: number, signal?: AbortSignal): Promise<string>;
+  readBlob(
+    name: string,
+    mimeType?: string,
+    maxBytes?: number,
+    signal?: AbortSignal,
+  ): Promise<Blob>;
+  readPrefix(name: string, maxBytes: number, signal?: AbortSignal): Promise<Uint8Array>;
   pipeTo(
     name: string,
     writable: WritableStream<Uint8Array>,
     onProgress?: (loaded: number, total: number) => void,
+    signal?: AbortSignal,
   ): Promise<void>;
   close(): Promise<void>;
 }
 
-export const DEFAULT_ARCHIVE_LIMITS: Readonly<ArchiveLimits> = {
-  maxEntries: 100_000,
-  maxEntryBytes: 16 * 1024 ** 3,
-  maxTotalBytes: 128 * 1024 ** 3,
-  maxCompressionRatio: 1_000,
-  maxTextBytes: 128 * 1024 ** 2,
-};
+export const DEFAULT_ARCHIVE_LIMITS: Readonly<ArchiveLimits> = BROWSER_ARCHIVE_LIMITS;
 
 export class ArchiveValidationError extends Error {
   readonly code: string;
@@ -84,10 +87,25 @@ export async function openValidatedZip(
     const canonicalNames = new Map<string, string>();
     const infos: ArchiveEntryInfo[] = [];
     let totalUncompressedBytes = 0;
+    let totalEntryNameBytes = 0;
 
     for (const entry of rawEntries) {
       const name = normalizeArchiveEntryName(entry.filename);
       assertSafeArchiveEntryName(name);
+      const entryNameBytes = new TextEncoder().encode(name).byteLength;
+      if (entryNameBytes > resolvedLimits.maxEntryNameBytes) {
+        throw new ArchiveValidationError(
+          "ZIP_ENTRY_NAME_TOO_LONG",
+          "ZIP 条目名称超过安全上限。",
+        );
+      }
+      totalEntryNameBytes = safeAdd(
+        totalEntryNameBytes,
+        entryNameBytes,
+        resolvedLimits.maxTotalEntryNameBytes,
+        "ZIP_ENTRY_NAMES_TOO_LARGE",
+        "ZIP 条目名称总量超过安全上限。",
+      );
 
       const canonical = canonicalArchiveName(name);
       const existing = canonicalNames.get(canonical);
@@ -162,6 +180,7 @@ export async function openValidatedZip(
     };
 
     let closed = false;
+    const activeReads = new Set<AbortController>();
     const ensureOpen = () => {
       if (closed) {
         throw new ArchiveValidationError("ZIP_CLOSED", "ZIP 已关闭，无法继续读取。");
@@ -185,39 +204,70 @@ export async function openValidatedZip(
         ensureOpen();
         return infos.map((entry) => entry.name);
       },
-      async readText(name, maxBytes = resolvedLimits.maxTextBytes) {
+      async readText(name, maxBytes = resolvedLimits.maxTextBytes, signal) {
         ensureOpen();
         const entry = getFile(name);
-        if (entry.uncompressedSize > maxBytes) {
+        assertMaterializationLimit(entry, maxBytes, "ZIP_TEXT_TOO_LARGE", name);
+        const bytes = await readEntryBytes(
+          entry,
+          maxBytes,
+          "ZIP_TEXT_TOO_LARGE",
+          signal,
+          activeReads,
+        );
+        try {
+          return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch {
           throw new ArchiveValidationError(
-            "ZIP_TEXT_TOO_LARGE",
-            `文本条目超过读取上限：${redactPath(name)}`,
+            "ZIP_TEXT_INVALID_UTF8",
+            `文本条目不是有效 UTF-8：${redactPath(name)}`,
           );
         }
-        return entry.getData(new TextWriter(), {
-          checkSignature: true,
-          useWebWorkers: false,
-        });
       },
-      async readBlob(name, mimeType = "application/octet-stream") {
-        ensureOpen();
-        return getFile(name).getData(new BlobWriter(mimeType), {
-          checkSignature: true,
-          useWebWorkers: false,
-        });
-      },
-      async pipeTo(name, writable, onProgress) {
+      async readBlob(
+        name,
+        mimeType = "application/octet-stream",
+        maxBytes = resolvedLimits.maxBlobBytes,
+        signal,
+      ) {
         ensureOpen();
         const entry = getFile(name);
-        await entry.getData(writable, {
-          checkSignature: true,
-          useWebWorkers: false,
-          onprogress: (loaded, total) => onProgress?.(loaded, total),
+        assertMaterializationLimit(entry, maxBytes, "ZIP_BLOB_TOO_LARGE", name);
+        const bytes = await readEntryBytes(
+          entry,
+          maxBytes,
+          "ZIP_BLOB_TOO_LARGE",
+          signal,
+          activeReads,
+        );
+        const blobBytes = new Uint8Array(bytes.byteLength);
+        blobBytes.set(bytes);
+        return new Blob([blobBytes.buffer], { type: mimeType });
+      },
+      async readPrefix(name, maxBytes, signal) {
+        ensureOpen();
+        if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+          throw new RangeError("Prefix byte count must be a positive safe integer.");
+        }
+        return readEntryPrefix(getFile(name), maxBytes, signal, activeReads);
+      },
+      async pipeTo(name, writable, onProgress, signal) {
+        ensureOpen();
+        const entry = getFile(name);
+        await withReadController(signal, activeReads, async (readSignal) => {
+          await entry.getData(writable, {
+            checkSignature: true,
+            checkOverlappingEntry: true,
+            useWebWorkers: false,
+            signal: readSignal,
+            onprogress: (loaded, total) => onProgress?.(loaded, total),
+          });
         });
       },
       async close() {
         if (closed) return;
         closed = true;
+        for (const controller of activeReads) controller.abort(createAbortError());
         await reader.close();
       },
     };
@@ -270,15 +320,143 @@ function isSymbolicLink(unixMode: number | undefined): boolean {
   return (unixMode & 0xf000) === 0xa000;
 }
 
-function safeAdd(current: number, next: number, maximum: number): number {
+function safeAdd(
+  current: number,
+  next: number,
+  maximum: number,
+  code = "ZIP_TOTAL_TOO_LARGE",
+  message = `ZIP 解压后总大小超过安全上限（${formatBytes(maximum)}）。`,
+): number {
   const total = current + next;
   if (!Number.isSafeInteger(total) || total > maximum) {
     throw new ArchiveValidationError(
-      "ZIP_TOTAL_TOO_LARGE",
-      `ZIP 解压后总大小超过安全上限（${formatBytes(maximum)}）。`,
+      code,
+      message,
     );
   }
   return total;
+}
+
+function assertMaterializationLimit(
+  entry: FileEntry,
+  maxBytes: number,
+  code: string,
+  name: string,
+): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError("Read byte limit must be a non-negative safe integer.");
+  }
+  if (entry.uncompressedSize > maxBytes) {
+    throw new ArchiveValidationError(code, `条目超过读取上限：${redactPath(name)}`);
+  }
+}
+
+async function readEntryBytes(
+  entry: FileEntry,
+  maxBytes: number,
+  code: string,
+  signal: AbortSignal | undefined,
+  activeReads: Set<AbortController>,
+): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const writable = new WritableStream<Uint8Array>({
+    write(chunk) {
+      total += chunk.byteLength;
+      if (!Number.isSafeInteger(total) || total > maxBytes) {
+        throw new ArchiveValidationError(code, "条目实际解压大小超过读取上限。");
+      }
+      chunks.push(chunk.slice());
+    },
+  });
+  await withReadController(signal, activeReads, async (readSignal) => {
+    await entry.getData(writable, {
+      checkSignature: true,
+      checkOverlappingEntry: true,
+      useWebWorkers: false,
+      signal: readSignal,
+    });
+  });
+  return joinChunks(chunks, total);
+}
+
+async function readEntryPrefix(
+  entry: FileEntry,
+  maxBytes: number,
+  signal: AbortSignal | undefined,
+  activeReads: Set<AbortController>,
+): Promise<Uint8Array> {
+  if (entry.uncompressedSize <= maxBytes) {
+    return readEntryBytes(
+      entry,
+      maxBytes,
+      "ZIP_PREFIX_TOO_LARGE",
+      signal,
+      activeReads,
+    );
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let reachedPrefix = false;
+  await withReadController(signal, activeReads, async (readSignal, controller) => {
+    const writable = new WritableStream<Uint8Array>({
+      write(chunk) {
+        const remaining = maxBytes - total;
+        if (remaining > 0) {
+          const portion = chunk.byteLength > remaining ? chunk.subarray(0, remaining) : chunk;
+          chunks.push(portion.slice());
+          total += portion.byteLength;
+        }
+        if (total >= maxBytes) {
+          reachedPrefix = true;
+          controller.abort(createAbortError());
+        }
+      },
+    });
+    try {
+      await entry.getData(writable, {
+        checkSignature: true,
+        checkOverlappingEntry: true,
+        useWebWorkers: false,
+        signal: readSignal,
+      });
+    } catch (error) {
+      if (!reachedPrefix || signal?.aborted) throw error;
+    }
+  });
+  return joinChunks(chunks, total);
+}
+
+async function withReadController<T>(
+  externalSignal: AbortSignal | undefined,
+  activeReads: Set<AbortController>,
+  operation: (signal: AbortSignal, controller: AbortController) => Promise<T>,
+): Promise<T> {
+  if (externalSignal?.aborted) throw externalSignal.reason ?? createAbortError();
+  const controller = new AbortController();
+  const abort = () => controller.abort(externalSignal?.reason ?? createAbortError());
+  externalSignal?.addEventListener("abort", abort, { once: true });
+  activeReads.add(controller);
+  try {
+    return await operation(controller.signal, controller);
+  } finally {
+    activeReads.delete(controller);
+    externalSignal?.removeEventListener("abort", abort);
+  }
+}
+
+function joinChunks(chunks: readonly Uint8Array[], total: number): Uint8Array {
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+function createAbortError(): DOMException {
+  return new DOMException("The operation was aborted.", "AbortError");
 }
 
 function formatBytes(bytes: number): string {

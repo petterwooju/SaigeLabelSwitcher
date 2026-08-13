@@ -176,6 +176,75 @@ test("SVPA container emits compatible manifest, project, images, readme and help
   }
 });
 
+test("SVPA sanitizes Windows reserved names in generated entries", async () => {
+  const source = project();
+  const reserved: ProjectIR = {
+    ...source,
+    project: { ...source.project, name: "NUL" },
+    files: [file(0, "C:\\images\\CON.png", 0)],
+  };
+  const handle = new MemorySaveHandle();
+  await writeSvpaArchive({
+    destination: { fileName: "reserved.zip", handle },
+    project: reserved,
+    srprojXml: writeSrproj(reserved),
+    helper: new Blob([new Uint8Array([77, 90])]),
+    images: [
+      {
+        fileIndex: 0,
+        originalPath: reserved.files[0]!.sourcePath,
+        source: {
+          kind: "blob",
+          blob: new Blob([new Uint8Array([1])]),
+          relativePath: "CON/CON.png",
+        },
+      },
+    ],
+  });
+  const archive = await openValidatedZip(handle.blob());
+  try {
+    assert.equal(archive.has("项目/_NUL.srproj"), true);
+    assert.equal(archive.has("图像/_CON/_CON.png"), true);
+  } finally {
+    await archive.close();
+  }
+});
+
+test("SVPA bounds generated image entry paths while preserving the extension", async () => {
+  const source = project();
+  const oneFile: ProjectIR = {
+    ...source,
+    files: [file(0, `C:\\images\\${"图".repeat(300)}.png`, 0)],
+  };
+  const handle = new MemorySaveHandle();
+  await writeSvpaArchive({
+    destination: { fileName: "bounded.zip", handle },
+    project: oneFile,
+    srprojXml: writeSrproj(oneFile),
+    helper: new Blob([new Uint8Array([77, 90])]),
+    images: [
+      {
+        fileIndex: 0,
+        originalPath: oneFile.files[0]!.sourcePath,
+        source: {
+          kind: "blob",
+          blob: new Blob([new Uint8Array([1])]),
+          relativePath: `${"目录/".repeat(30)}${"图".repeat(300)}.png`,
+        },
+      },
+    ],
+  });
+  const archive = await openValidatedZip(handle.blob());
+  try {
+    const imageEntry = archive.names().find((name) => name.startsWith("图像/"));
+    assert.ok(imageEntry);
+    assert.ok(new TextEncoder().encode(imageEntry).byteLength <= 210);
+    assert.match(imageEntry, /\.png$/u);
+  } finally {
+    await archive.close();
+  }
+});
+
 test("SVPA deduplicates canonical OriginalPath entries and packages shared bytes once", async () => {
   const source = project();
   const duplicatePath = "C:\\共享\\同名.png";
@@ -406,4 +475,46 @@ test("container rejects duplicate and incomplete image mappings", async () => {
     }),
     /重复映射/u,
   );
+});
+
+test("vision container rejects images assigned to the wrong project index", async () => {
+  const source = project();
+  const built = writeV2VisionProject(source);
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  const swapped = source.files.map((file, index) => ({
+    fileIndex: index,
+    originalPath: source.files[1 - index]!.sourcePath,
+    source: { kind: "blob" as const, blob: new Blob([String(index)]) },
+  }));
+  await assert.rejects(
+    writeVisionArchive({
+      destination: { fileName: built.fileName, handle: new MemorySaveHandle() },
+      built,
+      images: swapped,
+    }),
+    (error: unknown) =>
+      error instanceof ContainerWriteError &&
+      error.code === "VISION_IMAGE_SOURCE_MISMATCH",
+  );
+});
+
+test("container writers reject an already aborted operation before writing", async () => {
+  const source = project();
+  const built = writeV2VisionProject(source);
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  const controller = new AbortController();
+  controller.abort(new DOMException("cancelled", "AbortError"));
+  const handle = new MemorySaveHandle();
+  await assert.rejects(
+    writeVisionArchive({
+      destination: { fileName: built.fileName, handle },
+      built,
+      images: [],
+      signal: controller.signal,
+    }),
+    (error) => error instanceof Error && error.name === "AbortError",
+  );
+  assert.equal(handle.blob().size, 0);
 });

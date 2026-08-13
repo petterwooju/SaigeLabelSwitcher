@@ -2,7 +2,14 @@ import { TextReader, type ZipWriter } from "@zip.js/zip.js";
 import type { OpenArchive } from "../archive/zip.ts";
 import { parseV1Srproj } from "../input/v1.ts";
 import type { ProjectIR } from "../model/project.ts";
-import { pathComparisonKey } from "../security/paths.ts";
+import {
+  pathComparisonKey,
+  validateZipEntryPath,
+} from "../security/paths.ts";
+import {
+  assertHelperIntegrity,
+  EXPECTED_HELPER_SHA256,
+} from "../security/helperIntegrity.ts";
 import type { SaveDestination, SaveResult } from "./save.ts";
 import { createZipDestination } from "./save.ts";
 import type { V2VisionWriteSuccess } from "./v2.ts";
@@ -46,6 +53,7 @@ export interface VisionArchiveOptions {
   readonly built: V2VisionWriteSuccess;
   readonly images: readonly ResolvedProjectImage[];
   readonly onProgress?: (progress: ContainerProgress) => void;
+  readonly signal?: AbortSignal;
 }
 
 export interface SvpaArchiveOptions {
@@ -58,6 +66,7 @@ export interface SvpaArchiveOptions {
   readonly originalProjectDirectory?: string;
   readonly helper?: Blob;
   readonly onProgress?: (progress: ContainerProgress) => void;
+  readonly signal?: AbortSignal;
 }
 
 export class ContainerWriteError extends Error {
@@ -75,7 +84,9 @@ export async function writeVisionArchive({
   built,
   images,
   onProgress,
+  signal,
 }: VisionArchiveOptions): Promise<SaveResult> {
+  throwIfAborted(signal);
   const imageByIndex = uniqueImagesByIndex(images);
   const jsonBytes = utf8Size(built.projectJsonText);
   const imageBytes = built.imageEntries.reduce((total, entry) => {
@@ -86,11 +97,17 @@ export async function writeVisionArchive({
         `缺少项目图片（索引 ${entry.fileIndex}）。`,
       );
     }
+    assertVisionImageIdentity(entry.source, image);
     return safeByteSum(total, sourceSize(image.source));
   }, 0);
   const totalBytes = safeByteSum(jsonBytes, imageBytes);
   const totalFiles = built.imageEntries.length + 1;
-  const output = await createZipDestination(destination, totalBytes + 4096);
+  const output = await createZipDestination(
+    destination,
+    totalBytes + 4096,
+    totalFiles,
+    signal,
+  );
   let completedBytes = 0;
   let completedFiles = 0;
 
@@ -110,6 +127,7 @@ export async function writeVisionArchive({
           completedBytes + loaded,
           totalBytes,
         ),
+      signal,
     );
     completedBytes += jsonBytes;
     completedFiles += 1;
@@ -137,6 +155,7 @@ export async function writeVisionArchive({
             completedBytes + loaded,
             totalBytes,
           ),
+        signal,
       );
       completedBytes += size;
       completedFiles += 1;
@@ -157,6 +176,31 @@ export async function writeVisionArchive({
   }
 }
 
+function assertVisionImageIdentity(
+  expected: V2VisionWriteSuccess["imageEntries"][number]["source"],
+  resolved: ResolvedProjectImage,
+): void {
+  const expectedPath =
+    expected.kind === "external" ? expected.path : expected.entryName;
+  if (pathComparisonKey(expectedPath) !== pathComparisonKey(resolved.originalPath)) {
+    throw new ContainerWriteError(
+      "VISION_IMAGE_SOURCE_MISMATCH",
+      `项目图片来源与文件索引 ${resolved.fileIndex} 不一致。`,
+    );
+  }
+  if (
+    expected.kind === "archive" &&
+    (resolved.source.kind !== "archive" ||
+      pathComparisonKey(expected.entryName) !==
+        pathComparisonKey(resolved.source.entryName))
+  ) {
+    throw new ContainerWriteError(
+      "VISION_IMAGE_SOURCE_MISMATCH",
+      `归档图片来源与文件索引 ${resolved.fileIndex} 不一致。`,
+    );
+  }
+}
+
 export async function writeSvpaArchive({
   destination,
   project,
@@ -166,7 +210,9 @@ export async function writeSvpaArchive({
   originalProjectDirectory = "",
   helper,
   onProgress,
+  signal,
 }: SvpaArchiveOptions): Promise<SaveResult> {
+  throwIfAborted(signal);
   const orderedFiles = [...project.files].sort(
     (left, right) => left.index - right.index,
   );
@@ -187,6 +233,7 @@ export async function writeSvpaArchive({
   const imageGroups = await groupSvpaImagesByOriginalPath(
     orderedFiles,
     imageByIndex,
+    signal,
   );
 
   const folders = packageFolders(language);
@@ -208,7 +255,8 @@ export async function writeSvpaArchive({
     2,
   );
   const readme = packageReadme(language, projectFileName);
-  const helperBlob = helper ?? (await loadHelper());
+  const helperBlob = helper ?? (await loadHelper(signal));
+  throwIfAborted(signal);
   const imageBytes = imageGroups.reduce((total, group) => {
     return safeByteSum(total, sourceSize(group.source));
   }, 0);
@@ -218,22 +266,33 @@ export async function writeSvpaArchive({
   );
   const totalBytes = [imageBytes, textBytes, helperBlob.size].reduce(safeByteSum, 0);
   const totalFiles = imageGroups.length + 4;
-  const output = await createZipDestination(destination, totalBytes + 8192);
+  const output = await createZipDestination(
+    destination,
+    totalBytes + 8192,
+    totalFiles,
+    signal,
+  );
   let completedFiles = 0;
   let completedBytes = 0;
 
   const addText = async (name: string, text: string) => {
     const size = utf8Size(text);
-    await addTextEntry(output.writer, name, text, 6, (loaded) =>
-      emitProgress(
-        onProgress,
-        "project",
-        name,
-        completedFiles,
-        totalFiles,
-        completedBytes + loaded,
-        totalBytes,
-      ),
+    await addTextEntry(
+      output.writer,
+      name,
+      text,
+      6,
+      (loaded) =>
+        emitProgress(
+          onProgress,
+          "project",
+          name,
+          completedFiles,
+          totalFiles,
+          completedBytes + loaded,
+          totalBytes,
+        ),
+      signal,
     );
     completedBytes += size;
     completedFiles += 1;
@@ -250,16 +309,21 @@ export async function writeSvpaArchive({
         );
       }
       const size = sourceSize(group.source);
-      await addBinaryEntry(output.writer, path, group.source, (loaded) =>
-        emitProgress(
-          onProgress,
-          "images",
-          path,
-          completedFiles,
-          totalFiles,
-          completedBytes + loaded,
-          totalBytes,
-        ),
+      await addBinaryEntry(
+        output.writer,
+        path,
+        group.source,
+        (loaded) =>
+          emitProgress(
+            onProgress,
+            "images",
+            path,
+            completedFiles,
+            totalFiles,
+            completedBytes + loaded,
+            totalBytes,
+          ),
+        signal,
       );
       completedBytes += size;
       completedFiles += 1;
@@ -280,6 +344,7 @@ export async function writeSvpaArchive({
           completedBytes + loaded,
           totalBytes,
         ),
+      signal,
     );
     completedBytes += helperBlob.size;
     completedFiles += 1;
@@ -321,10 +386,13 @@ async function addTextEntry(
   value: string,
   level: number,
   onProgress: (loaded: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   await writer.add(name, new TextReader(value), {
     level,
     onprogress: (loaded) => onProgress(loaded),
+    signal,
   });
 }
 
@@ -333,22 +401,40 @@ async function addBinaryEntry(
   name: string,
   source: BinarySource,
   onProgress: (loaded: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   if (source.kind === "blob") {
     await writer.add(name, source.blob.stream(), {
       level: 0,
       onprogress: (loaded) => onProgress(loaded),
+      signal,
     });
     return;
   }
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", forwardAbort, { once: true });
   const stream = new TransformStream<Uint8Array, Uint8Array>();
-  await Promise.all([
-    source.archive.pipeTo(source.entryName, stream.writable),
+  const operations = [
+    source.archive.pipeTo(source.entryName, stream.writable, undefined, controller.signal),
     writer.add(name, stream.readable, {
       level: 0,
       onprogress: (loaded) => onProgress(loaded),
+      signal: controller.signal,
     }),
-  ]);
+  ].map((operation) =>
+    operation.catch((error: unknown) => {
+      controller.abort(error);
+      throw error;
+    }),
+  );
+  const results = await Promise.allSettled(operations);
+  signal?.removeEventListener("abort", forwardAbort);
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) throw failure.reason;
 }
 
 function sourceSize(source: BinarySource): number {
@@ -394,6 +480,7 @@ function validateSrprojPathMultiset(
 async function groupSvpaImagesByOriginalPath(
   files: readonly ProjectIR["files"][number][],
   images: ReadonlyMap<number, ResolvedProjectImage>,
+  signal?: AbortSignal,
 ): Promise<readonly SvpaImageGroup[]> {
   const groups = new Map<string, SvpaImageGroup>();
   const projectIndexes = new Set(files.map((file) => file.index));
@@ -407,6 +494,7 @@ async function groupSvpaImagesByOriginalPath(
   }
 
   for (const file of files) {
+    throwIfAborted(signal);
     const resolved = images.get(file.index);
     if (!resolved) {
       throw new ContainerWriteError(
@@ -440,7 +528,7 @@ async function groupSvpaImagesByOriginalPath(
       continue;
     }
 
-    if (!(await binarySourcesEqual(existing.source, resolved.source))) {
+    if (!(await binarySourcesEqual(existing.source, resolved.source, signal))) {
       throw new ContainerWriteError(
         "SVPA_IMAGE_SOURCE_CONFLICT",
         `同一原始路径解析到了不同的图片内容：${redactPath(file.sourcePath)}`,
@@ -499,6 +587,7 @@ function canonicalOriginalPath(value: string): string {
 async function binarySourcesEqual(
   left: BinarySource,
   right: BinarySource,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const leftSize = sourceSize(left);
   const rightSize = sourceSize(right);
@@ -515,15 +604,17 @@ async function binarySourcesEqual(
   ) {
     return true;
   }
-  return compareBinarySourceBytes(left, right);
+  return compareBinarySourceBytes(left, right, signal);
 }
 
 async function compareBinarySourceBytes(
   left: BinarySource,
   right: BinarySource,
+  signal?: AbortSignal,
 ): Promise<boolean> {
-  const leftStream = binarySourceStream(left);
-  const rightStream = binarySourceStream(right);
+  throwIfAborted(signal);
+  const leftStream = binarySourceStream(left, signal);
+  const rightStream = binarySourceStream(right, signal);
   const leftReader = leftStream.readable.getReader();
   const rightReader = rightStream.readable.getReader();
   let leftChunk: Uint8Array = new Uint8Array(0);
@@ -534,6 +625,7 @@ async function compareBinarySourceBytes(
 
   try {
     while (true) {
+      throwIfAborted(signal);
       if (leftOffset === leftChunk.byteLength) {
         const next = await leftReader.read();
         leftChunk = next.value ?? new Uint8Array(0);
@@ -590,7 +682,7 @@ async function compareBinarySourceBytes(
   return equal;
 }
 
-function binarySourceStream(source: BinarySource): {
+function binarySourceStream(source: BinarySource, signal?: AbortSignal): {
   readonly readable: ReadableStream<Uint8Array>;
   readonly completed: Promise<void>;
 } {
@@ -599,7 +691,7 @@ function binarySourceStream(source: BinarySource): {
   }
   const stream = new TransformStream<Uint8Array, Uint8Array>();
   const completed = source.archive
-    .pipeTo(source.entryName, stream.writable)
+    .pipeTo(source.entryName, stream.writable, undefined, signal)
     .catch((error: unknown) => {
       void stream.writable.abort(error).catch(() => undefined);
       throw error;
@@ -621,18 +713,46 @@ function safeRelativePath(value: string, index: number): string {
     .replace(/\\/gu, "/")
     .split("/")
     .filter((segment) => segment && segment !== "." && segment !== "..")
-    .map((segment) =>
-      Array.from(segment, (character) => {
+    .map((segment) => {
+      const sanitized = Array.from(segment, (character) => {
         const code = character.codePointAt(0) ?? 0;
         return code <= 0x1f || code === 0x7f || '<>:"|?*'.includes(character)
           ? "_"
           : character;
       })
         .join("")
-        .replace(/[ .]+$/u, ""),
-    )
+        .replace(/[ .]+$/u, "");
+      const validation = validateZipEntryPath(sanitized);
+      const safeName = !validation.safe && validation.reason === "reserved-name"
+        ? `_${sanitized}`
+        : sanitized;
+      return truncateUtf8Segment(safeName, 120);
+    })
     .filter(Boolean);
+  while (segments.length > 2 && utf8Size(segments.join("/")) > 200) {
+    segments.shift();
+  }
+  if (segments.length === 2 && utf8Size(segments.join("/")) > 200) {
+    segments[0] = truncateUtf8Segment(segments[0], 60);
+    segments[1] = truncateUtf8Segment(segments[1], 130);
+  } else if (segments.length === 1) {
+    segments[0] = truncateUtf8Segment(segments[0], 200);
+  }
   return segments.join("/") || `image_${index + 1}`;
+}
+
+function truncateUtf8Segment(value: string, maxBytes: number): string {
+  if (utf8Size(value) <= maxBytes) return value;
+  const { stem, suffix } = splitExtension(value);
+  const safeSuffix = utf8Size(suffix) <= 20 ? suffix : "";
+  const characters = Array.from(stem);
+  while (
+    characters.length > 0 &&
+    utf8Size(`${characters.join("")}${safeSuffix}`) > maxBytes
+  ) {
+    characters.pop();
+  }
+  return `${characters.join("") || "file"}${safeSuffix}`;
 }
 
 function splitExtension(value: string): { stem: string; suffix: string } {
@@ -674,18 +794,18 @@ function readmeName(language: AppLanguage): string {
 
 function packageReadme(language: AppLanguage, projectFileName: string): string {
   if (language === "ko-KR") {
-    return `SaigeVision 프로젝트 패키지\r\n\r\n1. ZIP을 로컬 폴더에 완전히 압축 해제합니다.\r\n2. “복구및실행.exe”를 실행합니다.\r\n3. 도구가 ${projectFileName}의 이미지 경로를 복구한 후 SaigeVision으로 엽니다.\r\n`;
+    return `SaigeVision 프로젝트 패키지\r\n\r\n1. ZIP을 로컬 폴더에 완전히 압축 해제합니다.\r\n2. “복구및실행.exe”를 실행합니다.\r\n3. 도구가 ${projectFileName}의 이미지 경로를 복구한 후 SaigeVision으로 엽니다.\r\n\r\n도구 SHA-256: ${EXPECTED_HELPER_SHA256}\r\n`;
   }
   if (language === "en-US") {
-    return `SaigeVision project package\r\n\r\n1. Extract the entire ZIP to a local folder.\r\n2. Run “RepairAndOpenProject.exe”.\r\n3. The helper repairs image paths in ${projectFileName}, then opens it with SaigeVision.\r\n`;
+    return `SaigeVision project package\r\n\r\n1. Extract the entire ZIP to a local folder.\r\n2. Run “RepairAndOpenProject.exe”.\r\n3. The helper repairs image paths in ${projectFileName}, then opens it with SaigeVision.\r\n\r\nHelper SHA-256: ${EXPECTED_HELPER_SHA256}\r\n`;
   }
-  return `SaigeVision 项目包\r\n\r\n1. 将 ZIP 完整解压到本机文件夹。\r\n2. 双击“一键修复并打开项目.exe”。\r\n3. 工具会修复 ${projectFileName} 中的图片路径，然后请求 SaigeVision 打开项目。\r\n`;
+  return `SaigeVision 项目包\r\n\r\n1. 将 ZIP 完整解压到本机文件夹。\r\n2. 双击“一键修复并打开项目.exe”。\r\n3. 工具会修复 ${projectFileName} 中的图片路径，然后请求 SaigeVision 打开项目。\r\n\r\n工具 SHA-256：${EXPECTED_HELPER_SHA256}\r\n`;
 }
 
-async function loadHelper(): Promise<Blob> {
+async function loadHelper(signal?: AbortSignal): Promise<Blob> {
   const response = await fetch(
-    "/downloads/SaigeVisionProjectAssistant.ZipFixer.exe",
-    { cache: "force-cache" },
+    `/downloads/SaigeVisionProjectAssistant.ZipFixer.exe?sha256=${EXPECTED_HELPER_SHA256}`,
+    { cache: "force-cache", signal },
   );
   if (!response.ok) {
     throw new ContainerWriteError(
@@ -693,7 +813,23 @@ async function loadHelper(): Promise<Blob> {
       `无法读取路径修复工具（HTTP ${response.status}）。`,
     );
   }
-  return response.blob();
+  const blob = await response.blob();
+  try {
+    await assertHelperIntegrity(blob);
+  } catch (error) {
+    throw new ContainerWriteError(
+      "HELPER_INTEGRITY_FAILED",
+      error instanceof Error ? error.message : "路径修复工具校验失败。",
+    );
+  }
+  return blob;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("The operation was aborted.", "AbortError");
 }
 
 function emitProgress(

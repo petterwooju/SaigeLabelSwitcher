@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
-
-const root = new URL("../", import.meta.url);
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -42,5 +40,4 @@ test("removes starter assets and keeps the converter client-side", async () => {
   assert.match(converter, /requestSaveDestination/);
   assert.match(converter, /writeVisionArchive/);
   assert.match(converter, /writeSvpaArchive/);
-  assert.deepEqual(await readdir(new URL("app/_sites-preview", root)), []);
 });

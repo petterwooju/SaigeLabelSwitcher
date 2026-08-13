@@ -157,7 +157,7 @@ test("V1 classification output uses deterministic IDs and the observed V2 schema
   assert.equal(first.jsonText, second.jsonText);
 
   const root = first.json as unknown as {
-    project: {
+    project: Record<string, unknown> & {
       projectId: number;
       projectType: string;
       classInfos: Array<Record<string, unknown>>;
@@ -165,25 +165,122 @@ test("V1 classification output uses deterministic IDs and the observed V2 schema
       projectFiles: Array<Record<string, unknown>>;
     };
   };
-  assert.equal(root.project.projectType, "cls");
-  assert.equal(root.project.classInfos[0]?.classId, root.project.projectId + 10);
-  assert.equal(root.project.datasets[0]?.datasetId, root.project.projectId + 1);
-  assert.equal(root.project.projectFiles[0]?.fileId, root.project.projectId + 1000);
-  assert.equal(root.project.projectFiles[0]?.filePath, "C:\\line-a\\frame.png");
-  assert.deepEqual(root.project.projectFiles[0]?.splitSets, [
+  const projectJson = root.project;
+  const classJson = projectJson.classInfos[0]!;
+  const datasetJson = projectJson.datasets[0]!;
+  const datasetSplit = (datasetJson.splitSets as Array<Record<string, unknown>>)[0]!;
+  const fileJson = projectJson.projectFiles[0]!;
+  const fileSplit = (fileJson.splitSets as Array<Record<string, unknown>>)[0]!;
+  const labels = fileJson.labelDataList as Array<Record<string, unknown>>;
+  const labelJson = labels[0]!;
+
+  assert.deepEqual(Object.keys(projectJson), [
+    "projectId",
+    "projectName",
+    "projectType",
+    "description",
+    "roiMode",
+    "roiPosX",
+    "roiPosY",
+    "roiWidth",
+    "roiHeight",
+    "roiShapeType",
+    "modifiedDate",
+    "createdDate",
+    "metadataList",
+    "classInfos",
+    "datasets",
+    "projectFiles",
+  ]);
+  assert.deepEqual(Object.keys(classJson), [
+    "classId",
+    "className",
+    "classNo",
+    "description",
+    "classColor",
+    "isNg",
+  ]);
+  assert.deepEqual(Object.keys(datasetJson), [
+    "datasetId",
+    "datasetName",
+    "description",
+    "modifiedDate",
+    "createdDate",
+    "createdBy",
+    "projects",
+    "metadataList",
+    "splitSets",
+  ]);
+  assert.deepEqual(Object.keys(datasetSplit), ["splitId", "splitName", "createdDate"]);
+  assert.deepEqual(Object.keys(fileJson), [
+    "projectId",
+    "fileId",
+    "filePath",
+    "isLabeled",
+    "modifiedDate",
+    "assignedDate",
+    "datasetName",
+    "width",
+    "height",
+    "className",
+    "labelDataList",
+    "metadata",
+    "registeredDate",
+    "isGenerated",
+    "splitSets",
+  ]);
+  assert.deepEqual(Object.keys(fileSplit), ["splitId", "splitName", "splitType"]);
+  assert.deepEqual(Object.keys(labelJson), [
+    "labelId",
+    "labelType",
+    "labeledDate",
+    "contourId",
+    "className",
+  ]);
+
+  assert.equal(projectJson.projectType, "cls");
+  assert.equal(projectJson.roiMode, "simple");
+  assert.equal(projectJson.roiPosX, 0);
+  assert.equal(projectJson.roiPosY, 0);
+  assert.equal(projectJson.roiWidth, 1);
+  assert.equal(projectJson.roiHeight, 1);
+  assert.equal(projectJson.roiShapeType, "rectangle");
+  assert.equal(projectJson.modifiedDate, 1_700_000_000_000);
+  assert.equal(projectJson.createdDate, 1_700_000_000_000);
+  assert.equal(classJson.classId, projectJson.projectId + 10);
+  assert.equal(datasetJson.datasetId, projectJson.projectId + 1);
+  assert.equal(datasetSplit.splitName, "srproj");
+  assert.equal(fileJson.fileId, projectJson.projectId + 1000);
+  assert.equal(fileJson.filePath, "C:\\line-a\\frame.png");
+  assert.equal(fileJson.className, "OK");
+  assert.equal(fileJson.isGenerated, false);
+  assert.deepEqual(fileJson.splitSets, [
     {
-      splitId: root.project.projectId + 2,
-      splitName: "default",
+      splitId: projectJson.projectId + 2,
+      splitName: "srproj",
       splitType: "train",
     },
   ]);
-  const labels = root.project.projectFiles[0]?.labelDataList as Array<
-    Record<string, unknown>
-  >;
-  assert.equal(labels[0]?.labelWidth, 32);
-  assert.equal(labels[0]?.labelHeight, 24);
-  assert.equal(labels[0]?.className, "OK");
-  assert.equal(labels[0]?.labelContour, "[[[0,0],[32,0],[32,24],[0,24]]]");
+  assert.equal(labelJson.labelId, projectJson.projectId + 100_000);
+  assert.equal(labelJson.labelType, "man");
+  assert.equal(labelJson.labeledDate, 1_700_000_000_000);
+  assert.equal(labelJson.className, "OK");
+  assert.equal(typeof labelJson.contourId, "string");
+});
+
+test("V1 classification writer output reparses without unmapped fields", () => {
+  const written = writeV2SubvisionProject(v1ClassificationProject());
+  assert.equal(written.ok, true);
+  if (!written.ok) return;
+
+  const reparsed = parseV2SubvisionProject({ jsonText: written.jsonText });
+  assert.equal(reparsed.ok, true);
+  if (!reparsed.ok) return;
+  assert.equal(
+    reparsed.diagnostics.filter((item) => item.code === "V2_UNMAPPED_FIELD").length,
+    0,
+  );
+  assert.notEqual(reparsed.compatibility.status, "blocked");
 });
 
 test("subvision output rejects relative and traversal image paths", () => {
@@ -260,7 +357,7 @@ test("subvision output accepts UNC paths and round-trips them", () => {
   );
 });
 
-test("V1 ARGB class colors retain their RGB channels in V2", () => {
+test("V1 ARGB class colors retain their RGB channels in the V2 class schema", () => {
   const source = v1ClassificationProject();
   const project: ProjectIR = {
     ...source,
@@ -273,10 +370,7 @@ test("V1 ARGB class colors retain their RGB channels in V2", () => {
   if (!written.ok) return;
   const root = written.json.project as JsonObject;
   const classes = root.classInfos as readonly JsonObject[];
-  const files = root.projectFiles as readonly JsonObject[];
-  const labels = files[0]?.labelDataList as readonly JsonObject[];
   assert.equal(classes[0]?.classColor, "#112233");
-  assert.equal(labels[0]?.classColor, "#112233");
 });
 
 test("vision output maps duplicate Windows basenames to unique images entries", () => {
@@ -351,4 +445,44 @@ test("DET and SEG output remain blocked without verified goldens", () => {
       result.diagnostics.some((item) => item.code === "V2_WRITE_GOLDEN_REQUIRED"),
     );
   }
+});
+
+test("V2 writers enforce parser compatibility unless loss was confirmed", () => {
+  const blocked: ProjectIR = {
+    ...v1ClassificationProject(),
+    compatibility: {
+      target: "v2",
+      status: "blocked",
+      preserveCount: 0,
+      rebuildCount: 0,
+      degradeCount: 0,
+      dropCount: 0,
+      blockCount: 1,
+    },
+  };
+  const blockedResult = writeV2SubvisionProject(blocked);
+  assert.equal(blockedResult.ok, false);
+  assert.ok(
+    blockedResult.diagnostics.some(
+      (item) => item.code === "V2_WRITE_COMPATIBILITY_BLOCKED",
+    ),
+  );
+
+  const needsConfirmation: ProjectIR = {
+    ...v1ClassificationProject(),
+    compatibility: {
+      target: "v2",
+      status: "confirmation-required",
+      preserveCount: 0,
+      rebuildCount: 0,
+      degradeCount: 0,
+      dropCount: 1,
+      blockCount: 0,
+    },
+  };
+  assert.equal(writeV2VisionProject(needsConfirmation).ok, false);
+  assert.equal(
+    writeV2VisionProject(needsConfirmation, { allowConfirmedLoss: true }).ok,
+    true,
+  );
 });

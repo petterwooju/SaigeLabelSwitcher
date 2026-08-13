@@ -18,6 +18,8 @@ export interface ProjectImageReference {
 
 export interface SelectedSourceFile {
   id: string;
+  /** Identifies the single browser/archive selection that supplied this file. */
+  selectionId: string;
   /** Present for directly selected browser files. Archive entries stay lazy. */
   file?: File;
   source: BinarySource;
@@ -36,6 +38,8 @@ export interface ArchiveSourceInput {
   readonly relativePath?: string;
   readonly size: number;
 }
+
+const DIRECT_SELECTION_PREFIX = "direct-selection";
 
 export type ImageMatchStatus = "matched" | "missing" | "ambiguous" | "blank";
 
@@ -144,6 +148,7 @@ export function mergeArchiveImageEntries(
     ].join("::");
     merged.set(id, {
       id,
+      selectionId,
       source: {
         kind: "archive",
         archive,
@@ -164,20 +169,31 @@ export function mergeSelectedFileInputs(
   inputs: Iterable<SourceFileInput>,
 ): SelectedSourceFile[] {
   const merged = new Map(current.map((item) => [item.id, item]));
+  const seenFiles = new Set<File>();
+  let selectionId: string | undefined;
+  let fileOrdinal = 0;
 
   for (const { file, relativePath: inputPath } of inputs) {
     const normalizedRelativePath = normalizePath(inputPath || file.name);
     const relativePath = normalizedRelativePath;
     const fileName = lastPathSegment(normalizedRelativePath);
     if (!fileName || shouldIgnoreSelectedFile(fileName)) continue;
+    if (seenFiles.has(file)) continue;
+    seenFiles.add(file);
 
+    selectionId ??= nextDirectSelectionId(current);
     const id = [
+      "blob",
+      selectionId,
+      fileOrdinal,
       pathComparisonKey(normalizedRelativePath),
       file.size,
       file.lastModified,
     ].join("::");
+    fileOrdinal += 1;
     merged.set(id, {
       id,
+      selectionId,
       file,
       source: { kind: "blob", blob: file, relativePath },
       relativePath,
@@ -187,6 +203,17 @@ export function mergeSelectedFileInputs(
   }
 
   return sortSelectedFiles(merged.values());
+}
+
+function nextDirectSelectionId(
+  current: readonly SelectedSourceFile[],
+): string {
+  const used = new Set(current.map((item) => item.selectionId));
+  let sequence = 1;
+  while (used.has(`${DIRECT_SELECTION_PREFIX}::${sequence}`)) {
+    sequence += 1;
+  }
+  return `${DIRECT_SELECTION_PREFIX}::${sequence}`;
 }
 
 function sortSelectedFiles(

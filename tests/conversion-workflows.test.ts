@@ -229,6 +229,7 @@ test("V2 vision -> SVPA -> loadProject yields V1 archive-backed IR", async () =>
     };
     const srprojXml = writeSrproj(packagedProject, {
       pathForFile: (file) => targetPaths.get(file.index) ?? "",
+      allowConfirmedLoss: true,
     });
     const images = embedded.images.map((image) => ({
       ...image,
@@ -285,7 +286,9 @@ test("V2 subvision + selected images -> SVPA -> loadProject", async () => {
         file?.image.kind === "external" ? file.image.path : file?.sourcePath ?? "";
       return { ...image, originalPath: outputPath };
     });
-    const srprojXml = writeSrproj(subvision.project);
+    const srprojXml = writeSrproj(subvision.project, {
+      allowConfirmedLoss: true,
+    });
     const handle = new MemorySaveHandle();
     await writeSvpaArchive({
       destination: { fileName: "from-subvision.zip", handle },

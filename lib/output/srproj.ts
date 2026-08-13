@@ -14,6 +14,8 @@ export interface SrprojWriteOptions {
   /** Required when archive-backed images need durable paths in the V1 project. */
   readonly pathForFile?: (file: ProjectFileIR, outputIndex: number) => string;
   readonly lineEnding?: "\n" | "\r\n";
+  /** Required only when the parser reported acknowledged, non-blocking loss. */
+  readonly allowConfirmedLoss?: boolean;
 }
 
 export class SrprojWriteError extends Error {
@@ -40,6 +42,7 @@ export function writeSrproj(
   project: ProjectIR,
   options: SrprojWriteOptions = {},
 ): string {
+  assertWriterCompatibility(project, "v1", options.allowConfirmedLoss ?? false);
   if (project.project.type !== "classification") {
     throw new SrprojWriteError(
       "SRPROJ_PROJECT_TYPE_UNSUPPORTED",
@@ -118,6 +121,29 @@ export function writeSrproj(
 
   lines.push("  </ImageGroup>", "</Project>", "");
   return lines.join(lineEnding);
+}
+
+function assertWriterCompatibility(
+  project: ProjectIR,
+  target: "v1" | "v2",
+  allowConfirmedLoss: boolean,
+): void {
+  const compatibility = project.compatibility;
+  if (!compatibility || compatibility.target !== target) return;
+  if (compatibility.status === "blocked") {
+    throw new SrprojWriteError(
+      "SRPROJ_COMPATIBILITY_BLOCKED",
+      "$.compatibility",
+      "The parsed project contains fields that cannot be represented safely in V1.",
+    );
+  }
+  if (compatibility.status === "confirmation-required" && !allowConfirmedLoss) {
+    throw new SrprojWriteError(
+      "SRPROJ_CONFIRMATION_REQUIRED",
+      "$.compatibility",
+      "The parsed project requires explicit confirmation before lossy V1 output.",
+    );
+  }
 }
 
 /** Return the exact UTF-8 bytes to save as `.srproj` (without a BOM). */

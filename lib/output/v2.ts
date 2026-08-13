@@ -8,7 +8,21 @@ import type {
   ProjectIR,
   SplitType,
 } from "../model/project.ts";
+import {
+  MAX_IMAGE_DIMENSION,
+  MAX_IMAGE_PIXELS,
+} from "../files/imageDimensions.ts";
 import { validateZipEntryPath } from "../security/paths.ts";
+import {
+  ARCHIVE_ENTRY_SEGMENT_MAX_BYTES,
+  appendBoundedProjectDiagnostic,
+  BROWSER_ARCHIVE_LIMITS,
+  EXTERNAL_PROJECT_PATH_MAX_BYTES,
+  exceedsUtf8ByteLimit,
+  inspectJsonResourceUsage,
+  PROJECT_TEXT_MAX_BYTES,
+  V2_PROJECT_LIMITS,
+} from "../security/resourceLimits.ts";
 
 const CLASS_COLORS = [
   "#CC3F31",
@@ -41,6 +55,8 @@ interface MutableJsonObject {
 export interface V2WriterOptions {
   /** JSON indentation. The default is compact JSON, matching observed files. */
   readonly space?: number;
+  /** Required only when the parser reported acknowledged, non-blocking loss. */
+  readonly allowConfirmedLoss?: boolean;
 }
 
 export interface V2SubvisionWriterOptions extends V2WriterOptions {
@@ -99,6 +115,12 @@ export function writeV2SubvisionProject(
   options: V2SubvisionWriterOptions = {},
 ): V2SubvisionWriteResult {
   const diagnostics: ProjectDiagnostic[] = [];
+  if (!validateCompatibility(project, options.allowConfirmedLoss ?? false, diagnostics)) {
+    return { ok: false, diagnostics };
+  }
+  if (!validateProjectResourceLimits(project, diagnostics)) {
+    return { ok: false, diagnostics };
+  }
   if (!validateSupportedProject(project, diagnostics)) {
     return { ok: false, diagnostics };
   }
@@ -155,6 +177,16 @@ export function writeV2SubvisionProject(
   if (!json || hasBlockingDiagnostic(diagnostics)) {
     return { ok: false, diagnostics };
   }
+  const jsonText = stringifyProject(json, options.space);
+  if (exceedsUtf8ByteLimit(jsonText, PROJECT_TEXT_MAX_BYTES)) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_TEXT_LIMIT_EXCEEDED",
+      "$",
+      `Generated V2 JSON exceeds the ${PROJECT_TEXT_MAX_BYTES}-byte UTF-8 limit.`,
+    );
+    return { ok: false, diagnostics };
+  }
 
   return {
     ok: true,
@@ -162,7 +194,7 @@ export function writeV2SubvisionProject(
     fileName:
       options.fileName ?? `${safeOutputStem(project.project.name)}.subvisionproj`,
     json,
-    jsonText: stringifyProject(json, options.space),
+    jsonText,
     diagnostics,
   };
 }
@@ -176,6 +208,27 @@ export function writeV2VisionProject(
   options: V2VisionWriterOptions = {},
 ): V2VisionWriteResult {
   const diagnostics: ProjectDiagnostic[] = [];
+  if (!validateCompatibility(project, options.allowConfirmedLoss ?? false, diagnostics)) {
+    return { ok: false, diagnostics };
+  }
+  if (!validateProjectResourceLimits(project, diagnostics)) {
+    return { ok: false, diagnostics };
+  }
+  if (
+    options.projectJsonEntryName !== undefined &&
+    exceedsUtf8ByteLimit(
+      options.projectJsonEntryName,
+      EXTERNAL_PROJECT_PATH_MAX_BYTES,
+    )
+  ) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_PATH_LIMIT_EXCEEDED",
+      "$.options.projectJsonEntryName",
+      `The requested project JSON entry name exceeds ${EXTERNAL_PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+    );
+    return { ok: false, diagnostics };
+  }
   if (!validateSupportedProject(project, diagnostics)) {
     return { ok: false, diagnostics };
   }
@@ -189,6 +242,16 @@ export function writeV2VisionProject(
   if (!json || hasBlockingDiagnostic(diagnostics)) {
     return { ok: false, diagnostics };
   }
+  const projectJsonText = stringifyProject(json, options.space);
+  if (exceedsUtf8ByteLimit(projectJsonText, PROJECT_TEXT_MAX_BYTES)) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_TEXT_LIMIT_EXCEEDED",
+      "$",
+      `Generated V2 JSON exceeds the ${PROJECT_TEXT_MAX_BYTES}-byte UTF-8 limit.`,
+    );
+    return { ok: false, diagnostics };
+  }
 
   const requestedJsonEntry = options.projectJsonEntryName?.trim();
   const preservedJsonEntry =
@@ -199,6 +262,20 @@ export function writeV2VisionProject(
     requestedJsonEntry ?? preservedJsonEntry,
     project.project.name,
   );
+  if (
+    exceedsUtf8ByteLimit(
+      projectJsonEntryName,
+      BROWSER_ARCHIVE_LIMITS.maxEntryNameBytes,
+    )
+  ) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_PATH_LIMIT_EXCEEDED",
+      "$.options.projectJsonEntryName",
+      `The project JSON entry name exceeds ${BROWSER_ARCHIVE_LIMITS.maxEntryNameBytes} UTF-8 bytes.`,
+    );
+    return { ok: false, diagnostics };
+  }
 
   return {
     ok: true,
@@ -206,7 +283,7 @@ export function writeV2VisionProject(
     fileName: options.fileName ?? `${safeOutputStem(project.project.name)}.visionproj`,
     projectJsonEntryName,
     json,
-    projectJsonText: stringifyProject(json, options.space),
+    projectJsonText,
     imageEntries,
     diagnostics,
   };
@@ -214,6 +291,313 @@ export function writeV2VisionProject(
 
 export const buildV2SubvisionProject = writeV2SubvisionProject;
 export const buildV2VisionProject = writeV2VisionProject;
+
+function validateProjectResourceLimits(
+  project: ProjectIR,
+  diagnostics: ProjectDiagnostic[],
+): boolean {
+  let valid = true;
+  const collections = [
+    {
+      actual: project.classes.length,
+      maximum: V2_PROJECT_LIMITS.maxClasses,
+      code: "V2_WRITE_CLASS_LIMIT_EXCEEDED",
+      path: "$.classes",
+      name: "class",
+    },
+    {
+      actual: project.datasets.length,
+      maximum: V2_PROJECT_LIMITS.maxDatasets,
+      code: "V2_WRITE_DATASET_LIMIT_EXCEEDED",
+      path: "$.datasets",
+      name: "dataset",
+    },
+    {
+      actual: project.files.length,
+      maximum: V2_PROJECT_LIMITS.maxFiles,
+      code: "V2_WRITE_FILE_LIMIT_EXCEEDED",
+      path: "$.files",
+      name: "file",
+    },
+  ] as const;
+  for (const collection of collections) {
+    if (collection.actual <= collection.maximum) continue;
+    resourceBlock(
+      diagnostics,
+      collection.code,
+      collection.path,
+      `V2 ${collection.name} count ${collection.actual} exceeds ${collection.maximum}.`,
+    );
+    valid = false;
+  }
+  if (project.files.length > V2_PROJECT_LIMITS.maxFiles) return false;
+
+  let totalLabels = 0;
+  let totalSplits = 0;
+  let invalidPathCount = 0;
+  let overlongPathCount = exceedsUtf8ByteLimit(
+    project.project.name,
+    EXTERNAL_PROJECT_PATH_MAX_BYTES,
+  )
+    ? 1
+    : 0;
+  let invalidDimensionCount = 0;
+  let oversizedAxisCount = 0;
+  let oversizedPixelCount = 0;
+
+  const checkPath = (value: unknown): void => {
+    if (typeof value !== "string") {
+      invalidPathCount += 1;
+    } else if (
+      exceedsUtf8ByteLimit(value, EXTERNAL_PROJECT_PATH_MAX_BYTES)
+    ) {
+      overlongPathCount += 1;
+    }
+  };
+
+  for (const file of project.files) {
+    totalLabels = saturatingAdd(totalLabels, file.labels.length, V2_PROJECT_LIMITS.maxLabels);
+    totalSplits = saturatingAdd(
+      totalSplits,
+      file.splits.length,
+      V2_PROJECT_LIMITS.maxSplitMemberships,
+    );
+    checkPath(file.sourcePath);
+    checkPath(file.normalizedPath);
+    checkPath(file.fileName);
+    checkPath(file.image.kind === "external" ? file.image.path : file.image.entryName);
+
+    const width = file.width;
+    const height = file.height;
+    if (
+      (width !== undefined && !isPositiveSafeInteger(width)) ||
+      (height !== undefined && !isPositiveSafeInteger(height))
+    ) {
+      invalidDimensionCount += 1;
+      continue;
+    }
+    if (
+      (width !== undefined && width > MAX_IMAGE_DIMENSION) ||
+      (height !== undefined && height > MAX_IMAGE_DIMENSION)
+    ) {
+      oversizedAxisCount += 1;
+      continue;
+    }
+    if (
+      width !== undefined &&
+      height !== undefined &&
+      width * height > MAX_IMAGE_PIXELS
+    ) {
+      oversizedPixelCount += 1;
+    }
+  }
+
+  if (totalLabels > V2_PROJECT_LIMITS.maxLabels) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_LABEL_LIMIT_EXCEEDED",
+      "$.files[*].labels",
+      `Total V2 label count exceeds ${V2_PROJECT_LIMITS.maxLabels}.`,
+    );
+    valid = false;
+  }
+  if (totalSplits > V2_PROJECT_LIMITS.maxSplitMemberships) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_SPLIT_LIMIT_EXCEEDED",
+      "$.files[*].splits",
+      `Total V2 split membership count exceeds ${V2_PROJECT_LIMITS.maxSplitMemberships}.`,
+    );
+    valid = false;
+  }
+  if (invalidPathCount > 0) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_PATH_INVALID",
+      "$.files[*]",
+      `${invalidPathCount} V2 path value(s) are not strings.`,
+    );
+    valid = false;
+  }
+  if (overlongPathCount > 0) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_PATH_LIMIT_EXCEEDED",
+      "$.files[*]",
+      `${overlongPathCount} V2 path value(s) exceed ${EXTERNAL_PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+    );
+    valid = false;
+  }
+  if (invalidDimensionCount > 0) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_IMAGE_DIMENSIONS_INVALID",
+      "$.files[*]",
+      `${invalidDimensionCount} image(s) use dimensions that are not positive safe integers.`,
+    );
+    valid = false;
+  }
+  if (oversizedAxisCount > 0) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_IMAGE_DIMENSION_LIMIT_EXCEEDED",
+      "$.files[*]",
+      `${oversizedAxisCount} image(s) exceed the ${MAX_IMAGE_DIMENSION}-pixel axis limit.`,
+    );
+    valid = false;
+  }
+  if (oversizedPixelCount > 0) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_IMAGE_PIXEL_LIMIT_EXCEEDED",
+      "$.files[*]",
+      `${oversizedPixelCount} image(s) exceed the ${MAX_IMAGE_PIXELS}-pixel limit.`,
+    );
+    valid = false;
+  }
+
+  if (isV2Source(project)) {
+    valid = validateSameVersionRawResources(project.raw, diagnostics) && valid;
+  }
+  return valid;
+}
+
+function validateSameVersionRawResources(
+  raw: JsonObject,
+  diagnostics: ProjectDiagnostic[],
+): boolean {
+  const inspection = inspectJsonResourceUsage(raw);
+  if (!inspection.ok) {
+    const code =
+      inspection.reason === "depth"
+        ? "V2_WRITE_RAW_DEPTH_LIMIT_EXCEEDED"
+        : inspection.reason === "values"
+          ? "V2_WRITE_RAW_VALUE_LIMIT_EXCEEDED"
+          : inspection.reason === "cycle"
+            ? "V2_WRITE_RAW_CYCLE"
+            : "V2_WRITE_RAW_JSON_INVALID";
+    resourceBlock(
+      diagnostics,
+      code,
+      "$.raw",
+      `Retained V2 JSON cannot be cloned safely because its ${inspection.reason} limit was exceeded.`,
+    );
+    return false;
+  }
+
+  const rawProject = readonlyJsonObject(raw.project);
+  const rawFiles = rawProject?.projectFiles;
+  if (!rawProject || !Array.isArray(rawFiles)) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_RAW_SCHEMA_INVALID",
+      "$.raw.project.projectFiles",
+      "Retained V2 JSON must contain a projectFiles array before cloning.",
+    );
+    return false;
+  }
+
+  let valid = true;
+  const rawCollections = [
+    {
+      value: rawProject.classInfos,
+      maximum: V2_PROJECT_LIMITS.maxClasses,
+      code: "V2_WRITE_RAW_CLASS_LIMIT_EXCEEDED",
+      path: "$.raw.project.classInfos",
+    },
+    {
+      value: rawProject.datasets,
+      maximum: V2_PROJECT_LIMITS.maxDatasets,
+      code: "V2_WRITE_RAW_DATASET_LIMIT_EXCEEDED",
+      path: "$.raw.project.datasets",
+    },
+    {
+      value: rawFiles,
+      maximum: V2_PROJECT_LIMITS.maxFiles,
+      code: "V2_WRITE_RAW_FILE_LIMIT_EXCEEDED",
+      path: "$.raw.project.projectFiles",
+    },
+  ] as const;
+  for (const collection of rawCollections) {
+    if (!Array.isArray(collection.value) || collection.value.length <= collection.maximum) {
+      continue;
+    }
+    resourceBlock(
+      diagnostics,
+      collection.code,
+      collection.path,
+      `Retained V2 collection count ${collection.value.length} exceeds ${collection.maximum}.`,
+    );
+    valid = false;
+  }
+  if (rawFiles.length > V2_PROJECT_LIMITS.maxFiles) return false;
+
+  let totalLabels = 0;
+  let totalSplits = 0;
+  let overlongPaths = 0;
+  for (const value of rawFiles) {
+    const file = readonlyJsonObject(value);
+    if (!file) continue;
+    if (Array.isArray(file.labelDataList)) {
+      totalLabels = saturatingAdd(
+        totalLabels,
+        file.labelDataList.length,
+        V2_PROJECT_LIMITS.maxLabels,
+      );
+    }
+    if (Array.isArray(file.splitSets)) {
+      totalSplits = saturatingAdd(
+        totalSplits,
+        file.splitSets.length,
+        V2_PROJECT_LIMITS.maxSplitMemberships,
+      );
+    }
+    if (
+      typeof file.filePath === "string" &&
+      exceedsUtf8ByteLimit(file.filePath, EXTERNAL_PROJECT_PATH_MAX_BYTES)
+    ) {
+      overlongPaths += 1;
+    }
+  }
+  if (totalLabels > V2_PROJECT_LIMITS.maxLabels) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_RAW_LABEL_LIMIT_EXCEEDED",
+      "$.raw.project.projectFiles[*].labelDataList",
+      `Retained V2 label count exceeds ${V2_PROJECT_LIMITS.maxLabels}.`,
+    );
+    valid = false;
+  }
+  if (totalSplits > V2_PROJECT_LIMITS.maxSplitMemberships) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_RAW_SPLIT_LIMIT_EXCEEDED",
+      "$.raw.project.projectFiles[*].splitSets",
+      `Retained V2 split membership count exceeds ${V2_PROJECT_LIMITS.maxSplitMemberships}.`,
+    );
+    valid = false;
+  }
+  if (overlongPaths > 0) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_RAW_PATH_LIMIT_EXCEEDED",
+      "$.raw.project.projectFiles[*].filePath",
+      `${overlongPaths} retained V2 file path(s) exceed ${EXTERNAL_PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+    );
+    valid = false;
+  }
+  return valid;
+}
+
+function saturatingAdd(current: number, addition: number, maximum: number): number {
+  return Math.min(maximum + 1, current + addition);
+}
+
+function readonlyJsonObject(value: unknown): JsonObject | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as JsonObject)
+    : undefined;
+}
 
 function validateSupportedProject(
   project: ProjectIR,
@@ -243,6 +627,34 @@ function validateSupportedProject(
       "V2_WRITE_PROJECT_NAME_REQUIRED",
       "$.project.name",
       "A V2 project name is required.",
+    );
+    return false;
+  }
+  return true;
+}
+
+function validateCompatibility(
+  project: ProjectIR,
+  allowConfirmedLoss: boolean,
+  diagnostics: ProjectDiagnostic[],
+): boolean {
+  const compatibility = project.compatibility;
+  if (!compatibility || compatibility.target !== "v2") return true;
+  if (compatibility.status === "blocked") {
+    block(
+      diagnostics,
+      "V2_WRITE_COMPATIBILITY_BLOCKED",
+      "$.compatibility",
+      "The parsed project contains fields that cannot be represented safely in V2.",
+    );
+    return false;
+  }
+  if (compatibility.status === "confirmation-required" && !allowConfirmedLoss) {
+    block(
+      diagnostics,
+      "V2_WRITE_CONFIRMATION_REQUIRED",
+      "$.compatibility",
+      "The parsed project requires explicit confirmation before lossy V2 output.",
     );
     return false;
   }
@@ -332,11 +744,9 @@ function buildClassificationJson(
   );
 
   const classInfos: MutableJsonObject[] = classes.map((item) => ({
-    projectId,
     classId: classIdByIndex.get(item.index) ?? projectId + 10 + item.index,
-    classNo: item.index,
-    classSeq: item.index,
     className: item.name,
+    classNo: item.index,
     description: item.description,
     classColor: normalizedClassColor(item, item.index),
     isNg: item.isNg ?? false,
@@ -345,7 +755,7 @@ function buildClassificationJson(
   let nextLabelId = projectId + 100_000;
   const fileJson: MutableJsonObject[] = files.map((file, outputIndex) => {
     const path = `$.files[${file.index}]`;
-    if (!isPositiveFinite(file.width) || !isPositiveFinite(file.height)) {
+    if (!isPositiveSafeInteger(file.width) || !isPositiveSafeInteger(file.height)) {
       block(
         diagnostics,
         "V2_WRITE_IMAGE_DIMENSIONS_REQUIRED",
@@ -370,34 +780,17 @@ function buildClassificationJson(
     if (
       cls &&
       classId !== undefined &&
-      isPositiveFinite(file.width) &&
-      isPositiveFinite(file.height)
+      isPositiveSafeInteger(file.width) &&
+      isPositiveSafeInteger(file.height)
     ) {
-      const width = file.width;
-      const height = file.height;
       const labelId = nextLabelId;
       nextLabelId += 1;
       labels.push({
         labelId,
         labelType: "man",
-        labelPosX: 0,
-        labelPosY: 0,
-        labelWidth: width,
-        labelHeight: height,
-        className: cls.name,
-        classColor: normalizedClassColor(cls, cls.index),
-        classId,
         labeledDate: timestamp,
-        labelContour: JSON.stringify([
-          [
-            [0, 0],
-            [width, 0],
-            [width, height],
-            [0, height],
-          ],
-        ]),
-        contourSize: width * height,
         contourId: deterministicUuid(`${projectId}:label:${labelId}`),
+        className: cls.name,
       });
     }
 
@@ -411,11 +804,13 @@ function buildClassificationJson(
       datasetName,
       ...(file.width !== undefined ? { width: file.width } : {}),
       ...(file.height !== undefined ? { height: file.height } : {}),
+      ...(cls ? { className: cls.name } : {}),
       labelDataList: labels,
       metadata: [],
       registeredDate: timestamp,
+      isGenerated: false,
       splitSets: [
-        { splitId, splitName: "default", splitType },
+        { splitId, splitName: "srproj", splitType },
       ],
     };
   });
@@ -428,7 +823,12 @@ function buildClassificationJson(
       projectName: project.project.name,
       projectType: "cls",
       description: project.project.description,
-      roiMode: project.project.roiMode || "no",
+      roiMode: "simple",
+      roiPosX: 0,
+      roiPosY: 0,
+      roiWidth: 1,
+      roiHeight: 1,
+      roiShapeType: "rectangle",
       modifiedDate: timestamp,
       createdDate: timestamp,
       metadataList: [],
@@ -443,7 +843,7 @@ function buildClassificationJson(
           createdBy: "admin",
           projects: [],
           metadataList: [],
-          splitSets: [{ splitId, splitName: "default", createdDate: timestamp }],
+          splitSets: [{ splitId, splitName: "srproj", createdDate: timestamp }],
         },
       ],
       projectFiles: fileJson,
@@ -588,10 +988,11 @@ function buildImageEntries(
   files: readonly ProjectFileIR[],
 ): V2VisionImageEntry[] {
   const used = new Set<string>();
+  const nextSequenceByBase = new Map<string, number>();
   return [...files]
     .sort((left, right) => left.index - right.index)
     .map((file) => {
-      const entryName = uniqueImageEntryName(file, used);
+      const entryName = uniqueImageEntryName(file, used, nextSequenceByBase);
       return {
         fileIndex: file.index,
         ...(file.sourceId !== undefined ? { sourceFileId: file.sourceId } : {}),
@@ -604,12 +1005,17 @@ function buildImageEntries(
     });
 }
 
-function uniqueImageEntryName(file: ProjectFileIR, used: Set<string>): string {
+function uniqueImageEntryName(
+  file: ProjectFileIR,
+  used: Set<string>,
+  nextSequenceByBase: Map<string, number>,
+): string {
   if (file.image.kind === "archive") {
     const validation = validateZipEntryPath(file.image.entryName);
     if (
       validation.safe &&
       validation.normalizedPath.toLocaleLowerCase("en-US").startsWith("images/") &&
+      archiveEntryNameFitsLimits(validation.normalizedPath) &&
       !used.has(entryKey(validation.normalizedPath))
     ) {
       used.add(entryKey(validation.normalizedPath));
@@ -622,13 +1028,14 @@ function uniqueImageEntryName(file: ProjectFileIR, used: Set<string>): string {
     lastPathSegment(file.sourcePath) ||
     `image_${file.index + 1}`;
   const safeName = safeImageFileName(sourceName, file.index);
-  const { stem, suffix } = splitExtension(safeName);
-  let sequence = 1;
   let candidate = `images/${safeName}`;
+  const baseKey = entryKey(candidate);
+  let sequence = nextSequenceByBase.get(baseKey) ?? 2;
   while (used.has(entryKey(candidate))) {
+    candidate = `images/${fitFileName(safeName, `_${sequence}`)}`;
     sequence += 1;
-    candidate = `images/${stem}_${sequence}${suffix}`;
   }
+  nextSequenceByBase.set(baseKey, sequence);
   used.add(entryKey(candidate));
   return candidate;
 }
@@ -689,6 +1096,15 @@ function validateExternalPath(
   diagnostics: ProjectDiagnostic[],
 ): string {
   const diagnosticPath = `$.files[${fileIndex}].image`;
+  if (exceedsUtf8ByteLimit(rawPath, EXTERNAL_PROJECT_PATH_MAX_BYTES)) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_PATH_LIMIT_EXCEEDED",
+      diagnosticPath,
+      `A .subvisionproj image path must not exceed ${EXTERNAL_PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+    );
+    return "";
+  }
   if (
     Array.from(rawPath).some((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
@@ -740,6 +1156,7 @@ function isAbsoluteExternalPath(path: string): boolean {
 }
 
 function safeRootJsonEntry(value: string | undefined, projectName: string): string {
+  let candidate: string | undefined;
   if (value) {
     const validation = validateZipEntryPath(value);
     if (
@@ -747,10 +1164,10 @@ function safeRootJsonEntry(value: string | undefined, projectName: string): stri
       !validation.normalizedPath.includes("/") &&
       validation.normalizedPath.toLocaleLowerCase("en-US").endsWith(".json")
     ) {
-      return validation.normalizedPath;
+      candidate = validation.normalizedPath;
     }
   }
-  return `${safeOutputStem(projectName)}.json`;
+  return fitFileName(candidate ?? `${safeOutputStem(projectName)}.json`);
 }
 
 function safeOutputStem(value: string): string {
@@ -766,7 +1183,60 @@ function safeImageFileName(value: string, index: number): string {
     .trim();
   if (!name) name = `image_${index + 1}`;
   if (WINDOWS_RESERVED_BASENAME.test(name)) name = `_${name}`;
-  return name;
+  return fitFileName(name);
+}
+
+function fitFileName(value: string, conflictSuffix = ""): string {
+  const { stem, suffix } = splitExtension(value);
+  const reservedBytes = utf8ByteLength(conflictSuffix) + utf8ByteLength(suffix);
+  const stemBudget = Math.max(1, ARCHIVE_ENTRY_SEGMENT_MAX_BYTES - reservedBytes);
+  let fittedStem = truncateUtf8(stem, stemBudget);
+  if (!fittedStem) fittedStem = truncateUtf8("image", stemBudget);
+  const candidate = `${fittedStem}${conflictSuffix}${suffix}`;
+  return exceedsUtf8ByteLimit(candidate, ARCHIVE_ENTRY_SEGMENT_MAX_BYTES)
+    ? truncateUtf8(candidate, ARCHIVE_ENTRY_SEGMENT_MAX_BYTES)
+    : candidate;
+}
+
+function archiveEntryNameFitsLimits(value: string): boolean {
+  return (
+    !exceedsUtf8ByteLimit(value, BROWSER_ARCHIVE_LIMITS.maxEntryNameBytes) &&
+    value
+      .split("/")
+      .every(
+        (segment) =>
+          !exceedsUtf8ByteLimit(segment, ARCHIVE_ENTRY_SEGMENT_MAX_BYTES),
+      )
+  );
+}
+
+function truncateUtf8(value: string, maximumBytes: number): string {
+  if (maximumBytes <= 0) return "";
+  let bytes = 0;
+  let result = "";
+  for (const character of value) {
+    const characterBytes = utf8ByteLength(character);
+    if (bytes + characterBytes > maximumBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}
+
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    bytes +=
+      codePoint <= 0x7f
+        ? 1
+        : codePoint <= 0x7ff
+          ? 2
+          : codePoint <= 0xffff
+            ? 3
+            : 4;
+  }
+  return bytes;
 }
 
 function replaceUnsafeFileNameCharacters(value: string): string {
@@ -819,8 +1289,8 @@ function isZeroBasedContiguous(values: readonly number[]): boolean {
   );
 }
 
-function isPositiveFinite(value: number | undefined): value is number {
-  return value !== undefined && Number.isFinite(value) && value > 0;
+function isPositiveSafeInteger(value: number | undefined): value is number {
+  return value !== undefined && Number.isSafeInteger(value) && value > 0;
 }
 
 function jsonString(value: JsonValue | undefined): string | undefined {
@@ -863,9 +1333,25 @@ function block(
   path: string,
   message: string,
 ): void {
-  diagnostics.push({
+  appendBoundedProjectDiagnostic(diagnostics, {
     code,
     category: "compatibility",
+    severity: "error",
+    disposition: "block",
+    path,
+    message,
+  });
+}
+
+function resourceBlock(
+  diagnostics: ProjectDiagnostic[],
+  code: string,
+  path: string,
+  message: string,
+): void {
+  appendBoundedProjectDiagnostic(diagnostics, {
+    code,
+    category: "security",
     severity: "error",
     disposition: "block",
     path,

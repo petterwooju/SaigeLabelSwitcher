@@ -342,6 +342,49 @@ test("allows distinct OriginalPath values to reuse one archive image", async () 
   }
 });
 
+test("normalizes drive and UNC file URLs in SVPA manifests", async () => {
+  const fileUrls = [
+    ["file:///C:/dataset/%E5%AE%A2%E6%88%B7/ok.png", "C:/dataset/客户/ok.png"],
+    ["file://server/share/images/ok.png", "//server/share/images/ok.png"],
+  ] as const;
+  for (const [storedPath, normalizedPath] of fileUrls) {
+    const manifest = svpaManifest({
+      OriginalProjectDirectory: "",
+      Entries: [{ OriginalPath: storedPath, RelativePath: "图像/ok.png" }],
+    });
+    const zip = await makeZip([
+      ["svpa_manifest.json", manifest],
+      ["项目/demo.srproj", srprojForPaths([normalizedPath])],
+      ["图像/ok.png", "image"],
+    ]);
+    const loaded = await loadProject(browserFile([zip], "file-url.zip"));
+    try {
+      assert.equal(loaded.parseResult.ok, true);
+      assert.equal(loaded.svpaManifest?.Entries[0]?.OriginalPath, normalizedPath);
+    } finally {
+      await loaded.close();
+    }
+  }
+});
+
+test("rejects unresolved relative parent traversal without a project directory", async () => {
+  const manifest = svpaManifest({
+    OriginalProjectDirectory: "",
+    Entries: [{ OriginalPath: "../outside.png", RelativePath: "图像/outside.png" }],
+  });
+  const zip = await makeZip([
+    ["svpa_manifest.json", manifest],
+    ["项目/demo.srproj", srprojForPaths(["../outside.png"])],
+    ["图像/outside.png", "image"],
+  ]);
+  await assert.rejects(
+    loadProject(browserFile([zip], "relative-parent.zip")),
+    (error: unknown) =>
+      error instanceof ProjectLoadError &&
+      error.code === "SVPA_ORIGINAL_PATH_INVALID",
+  );
+});
+
 test("uses content despite an extension mismatch and adds a warning", async () => {
   const loaded = await loadProject(browserFile([srproj], "actually-xml.visionproj"));
   assert.equal(loaded.format, "v1-srproj");
@@ -483,5 +526,37 @@ test("requires exactly one root project JSON in a vision archive", async () => {
     (error: unknown) =>
       error instanceof ProjectLoadError &&
       error.code === "VISION_PROJECT_JSON_COUNT_INVALID",
+  );
+});
+
+test("loadProject observes an already aborted operation", async () => {
+  const controller = new AbortController();
+  controller.abort(new DOMException("cancelled", "AbortError"));
+  await assert.rejects(
+    loadProject(browserFile(["<Project />"], "cancelled.srproj"), {
+      signal: controller.signal,
+    }),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+});
+
+test("SVPA manifest rejects excessive JSON nesting before retaining raw fields", async () => {
+  let nested: unknown = "leaf";
+  for (let index = 0; index < 130; index += 1) nested = { nested };
+  const manifest = JSON.stringify({
+    ProjectFile: "项目/demo.srproj",
+    OriginalProjectDirectory: "",
+    Entries: [],
+    unknown: nested,
+  });
+  const zip = await makeZip([
+    ["svpa_manifest.json", manifest],
+    ["项目/demo.srproj", srproj],
+  ]);
+  await assert.rejects(
+    loadProject(browserFile([zip], "deep.zip")),
+    (error: unknown) =>
+      error instanceof ProjectLoadError &&
+      error.code === "SVPA_MANIFEST_RESOURCE_LIMIT",
   );
 });

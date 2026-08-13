@@ -22,6 +22,21 @@ import type {
   ProjectType,
   SplitType,
 } from "../model/project.ts";
+import {
+  MAX_IMAGE_DIMENSION,
+  MAX_IMAGE_PIXELS,
+} from "../files/imageDimensions.ts";
+import {
+  appendBoundedProjectDiagnostic,
+  BROWSER_ARCHIVE_LIMITS,
+  exceedsUtf8ByteLimit,
+  PROJECT_PATH_MAX_BYTES,
+  PROJECT_JSON_MAX_VALUES,
+  PROJECT_STRUCTURE_MAX_DEPTH,
+  projectDiagnosticsAreTruncated,
+  PROJECT_TEXT_MAX_BYTES,
+  V2_PROJECT_LIMITS,
+} from "../security/resourceLimits.ts";
 
 export interface V2ArchiveEntry {
   readonly name: string;
@@ -192,6 +207,10 @@ export const parseSubvisionProject = parseV2SubvisionProject;
 export const parseVisionProject = parseV2VisionProject;
 
 function parseProjectJson(text: string, context: ParseContext): ProjectParseResult {
+  if (!preflightJsonText(context, text, "$")) {
+    return failure(context.diagnostics);
+  }
+
   let value: unknown;
   try {
     value = JSON.parse(stripBom(text));
@@ -212,6 +231,9 @@ function parseProjectJson(text: string, context: ParseContext): ProjectParseResu
     invalid(context, "$", "V2_ROOT_NOT_OBJECT", "The JSON root must be an object.");
     return failure(context.diagnostics);
   }
+  if (!validateJsonValueBudget(context, value, "$")) {
+    return failure(context.diagnostics);
+  }
 
   reportUnknownFields(context, value, new Set(["project"]), "$", "root");
   if (!isJsonObject(value.project)) {
@@ -225,6 +247,9 @@ function parseProjectJson(text: string, context: ParseContext): ProjectParseResu
   }
 
   const projectRaw = value.project;
+  if (!validateV2ResourceShape(context, projectRaw)) {
+    return failure(context.diagnostics);
+  }
   reportUnknownFields(context, projectRaw, PROJECT_KNOWN_FIELDS, "$.project", "project");
 
   const name = requiredNonEmptyString(
@@ -292,6 +317,7 @@ function parseProjectJson(text: string, context: ParseContext): ProjectParseResu
 
   reportKnownLosses(context, projectRaw, classes, datasets, files);
 
+  const compatibilitySummary = summarizeCompatibility(context.diagnostics);
   const project: ProjectIR = {
     schemaVersion: 1,
     source: {
@@ -319,6 +345,7 @@ function parseProjectJson(text: string, context: ParseContext): ProjectParseResu
     datasets,
     files,
     raw: value,
+    compatibility: compatibilitySummary,
   };
 
   if (hasFatalValidation(context.diagnostics)) return failure(context.diagnostics);
@@ -326,8 +353,222 @@ function parseProjectJson(text: string, context: ParseContext): ProjectParseResu
     ok: true,
     project,
     diagnostics: context.diagnostics,
-    compatibility: summarizeCompatibility(context.diagnostics),
+    compatibility: compatibilitySummary,
   };
+}
+
+function preflightJsonText(
+  context: ParseContext,
+  text: string,
+  path: string,
+  enforceTextLimit = true,
+): boolean {
+  if (enforceTextLimit && exceedsUtf8ByteLimit(text, PROJECT_TEXT_MAX_BYTES)) {
+    addDiagnostic(context, {
+      code: "V2_TEXT_LIMIT_EXCEEDED",
+      category: "security",
+      severity: "error",
+      disposition: "block",
+      path,
+      message: `V2 JSON exceeds the ${PROJECT_TEXT_MAX_BYTES}-byte UTF-8 text limit.`,
+      details: { maxBytes: PROJECT_TEXT_MAX_BYTES },
+    });
+    return false;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === "{" || character === "[") {
+      depth += 1;
+      if (depth > PROJECT_STRUCTURE_MAX_DEPTH) {
+        addDiagnostic(context, {
+          code: "V2_JSON_DEPTH_LIMIT_EXCEEDED",
+          category: "security",
+          severity: "error",
+          disposition: "block",
+          path,
+          message: `JSON nesting exceeds ${PROJECT_STRUCTURE_MAX_DEPTH} levels.`,
+          details: { maxDepth: PROJECT_STRUCTURE_MAX_DEPTH, offset: index },
+        });
+        return false;
+      }
+    } else if ((character === "}" || character === "]") && depth > 0) {
+      depth -= 1;
+    }
+  }
+  return true;
+}
+
+function validateV2ResourceShape(
+  context: ParseContext,
+  project: JsonObject,
+): boolean {
+  let valid = true;
+  const checkArrayLimit = (
+    value: JsonValue | undefined,
+    maximum: number,
+    code: string,
+    path: string,
+    entityName: string,
+  ): boolean => {
+    if (!Array.isArray(value) || value.length <= maximum) return true;
+    addDiagnostic(context, {
+      code,
+      category: "security",
+      severity: "error",
+      disposition: "block",
+      path,
+      message: `V2 ${entityName} count must not exceed ${maximum}.`,
+      details: { actualCount: value.length, maximum },
+    });
+    return false;
+  };
+
+  valid =
+    checkArrayLimit(
+      project.classInfos,
+      V2_PROJECT_LIMITS.maxClasses,
+      "V2_CLASS_LIMIT_EXCEEDED",
+      "$.project.classInfos",
+      "class",
+    ) && valid;
+  valid =
+    checkArrayLimit(
+      project.datasets,
+      V2_PROJECT_LIMITS.maxDatasets,
+      "V2_DATASET_LIMIT_EXCEEDED",
+      "$.project.datasets",
+      "dataset",
+    ) && valid;
+  const filesWithinLimit = checkArrayLimit(
+    project.projectFiles,
+    V2_PROJECT_LIMITS.maxFiles,
+    "V2_FILE_LIMIT_EXCEEDED",
+    "$.project.projectFiles",
+    "file",
+  );
+  valid = filesWithinLimit && valid;
+
+  if (filesWithinLimit && Array.isArray(project.projectFiles)) {
+    let totalLabels = 0;
+    let totalSplitMemberships = 0;
+    let overlongPathCount = 0;
+    for (const file of project.projectFiles) {
+      if (!isJsonObject(file)) continue;
+      if (
+        typeof file.filePath === "string" &&
+        exceedsUtf8ByteLimit(file.filePath, PROJECT_PATH_MAX_BYTES)
+      ) {
+        overlongPathCount += 1;
+      }
+      if (Array.isArray(file.labelDataList)) {
+        totalLabels = Math.min(
+          V2_PROJECT_LIMITS.maxLabels + 1,
+          totalLabels + file.labelDataList.length,
+        );
+      }
+      if (Array.isArray(file.splitSets)) {
+        totalSplitMemberships = Math.min(
+          V2_PROJECT_LIMITS.maxSplitMemberships + 1,
+          totalSplitMemberships + file.splitSets.length,
+        );
+      }
+    }
+    if (totalLabels > V2_PROJECT_LIMITS.maxLabels) {
+      addDiagnostic(context, {
+        code: "V2_LABEL_LIMIT_EXCEEDED",
+        category: "security",
+        severity: "error",
+        disposition: "block",
+        path: "$.project.projectFiles[*].labelDataList",
+        message: `Total V2 label count must not exceed ${V2_PROJECT_LIMITS.maxLabels}.`,
+        details: {
+          observedCountAtLeast: totalLabels,
+          maximum: V2_PROJECT_LIMITS.maxLabels,
+        },
+      });
+      valid = false;
+    }
+    if (overlongPathCount > 0) {
+      addDiagnostic(context, {
+        code: "V2_PATH_LIMIT_EXCEEDED",
+        category: "security",
+        severity: "error",
+        disposition: "block",
+        path: "$.project.projectFiles[*].filePath",
+        message: `V2 image paths must not exceed ${PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+        details: {
+          overlongPathCount,
+          maxBytes: PROJECT_PATH_MAX_BYTES,
+        },
+      });
+      valid = false;
+    }
+    if (totalSplitMemberships > V2_PROJECT_LIMITS.maxSplitMemberships) {
+      addDiagnostic(context, {
+        code: "V2_SPLIT_LIMIT_EXCEEDED",
+        category: "security",
+        severity: "error",
+        disposition: "block",
+        path: "$.project.projectFiles[*].splitSets",
+        message: `Total V2 split membership count must not exceed ${V2_PROJECT_LIMITS.maxSplitMemberships}.`,
+        details: {
+          observedCountAtLeast: totalSplitMemberships,
+          maximum: V2_PROJECT_LIMITS.maxSplitMemberships,
+        },
+      });
+      valid = false;
+    }
+  }
+  return valid;
+}
+
+function validateJsonValueBudget(
+  context: ParseContext,
+  root: unknown,
+  path: string,
+): boolean {
+  const stack: unknown[] = [root];
+  let valueCount = 0;
+  while (stack.length > 0) {
+    const value = stack.pop();
+    valueCount += 1;
+    if (valueCount > PROJECT_JSON_MAX_VALUES) {
+      addDiagnostic(context, {
+        code: "V2_JSON_VALUE_LIMIT_EXCEEDED",
+        category: "security",
+        severity: "error",
+        disposition: "block",
+        path,
+        message: `JSON value count must not exceed ${PROJECT_JSON_MAX_VALUES}.`,
+        details: { maximum: PROJECT_JSON_MAX_VALUES },
+      });
+      return false;
+    }
+    if (Array.isArray(value)) {
+      for (const child of value) stack.push(child);
+    } else if (isJsonObject(value)) {
+      for (const child of Object.values(value)) stack.push(child);
+    }
+  }
+  return true;
 }
 
 function parseClasses(
@@ -581,6 +822,64 @@ function parseFiles(
         ? resolveClassIndex(context, raw, classes, path, hasClassReference(raw))
         : undefined;
 
+    if (raw.isLabeled !== undefined && typeof raw.isLabeled !== "boolean") {
+      invalid(
+        context,
+        `${path}.isLabeled`,
+        "V2_IS_LABELED_INVALID",
+        "isLabeled must be boolean when supplied.",
+      );
+    }
+
+    const width = positiveSafeInteger(raw.width);
+    const height = positiveSafeInteger(raw.height);
+    if (raw.width !== undefined && width === undefined) {
+      invalid(
+        context,
+        `${path}.width`,
+        "V2_WIDTH_INVALID",
+        "Image width must be a positive safe integer.",
+      );
+    }
+    if (raw.height !== undefined && height === undefined) {
+      invalid(
+        context,
+        `${path}.height`,
+        "V2_HEIGHT_INVALID",
+        "Image height must be a positive safe integer.",
+      );
+    }
+    if (width !== undefined && width > MAX_IMAGE_DIMENSION) {
+      invalid(
+        context,
+        `${path}.width`,
+        "V2_IMAGE_DIMENSION_LIMIT_EXCEEDED",
+        `Image width must not exceed ${MAX_IMAGE_DIMENSION}.`,
+      );
+    }
+    if (height !== undefined && height > MAX_IMAGE_DIMENSION) {
+      invalid(
+        context,
+        `${path}.height`,
+        "V2_IMAGE_DIMENSION_LIMIT_EXCEEDED",
+        `Image height must not exceed ${MAX_IMAGE_DIMENSION}.`,
+      );
+    }
+    if (
+      width !== undefined &&
+      height !== undefined &&
+      width <= MAX_IMAGE_DIMENSION &&
+      height <= MAX_IMAGE_DIMENSION &&
+      width * height > MAX_IMAGE_PIXELS
+    ) {
+      invalid(
+        context,
+        path,
+        "V2_IMAGE_PIXEL_LIMIT_EXCEEDED",
+        `Image pixel count must not exceed ${MAX_IMAGE_PIXELS}.`,
+      );
+    }
+
     const labelValues = optionalObjectArray(
       context,
       raw.labelDataList,
@@ -595,17 +894,10 @@ function parseFiles(
       raw,
       path,
       fileClassIndex,
+      width,
+      height,
     );
     const labels = parsedLabels.labels;
-
-    const width = positiveInteger(raw.width);
-    const height = positiveInteger(raw.height);
-    if (raw.width !== undefined && width === undefined) {
-      invalid(context, `${path}.width`, "V2_WIDTH_INVALID", "Image width must be a positive integer.");
-    }
-    if (raw.height !== undefined && height === undefined) {
-      invalid(context, `${path}.height`, "V2_HEIGHT_INVALID", "Image height must be a positive integer.");
-    }
     validateGeometryBounds(context, labels, width, height, path);
 
     files.push({
@@ -711,6 +1003,8 @@ function parseLabels(
   fileRaw: JsonObject,
   filePath: string,
   fileClassIndex: number | undefined,
+  imageWidth: number | undefined,
+  imageHeight: number | undefined,
 ): ParsedLabels {
   if (projectType === "classification") {
     return parseClassificationLabels(
@@ -720,6 +1014,8 @@ function parseLabels(
       fileRaw,
       filePath,
       fileClassIndex,
+      imageWidth,
+      imageHeight,
     );
   }
 
@@ -778,6 +1074,8 @@ function parseClassificationLabels(
   fileRaw: JsonObject,
   filePath: string,
   fileClassIndex: number | undefined,
+  imageWidth: number | undefined,
+  imageHeight: number | undefined,
 ): ParsedLabels {
   if (values.length === 0) {
     if (fileClassIndex === undefined) {
@@ -854,7 +1152,13 @@ function parseClassificationLabels(
         : cls
           ? { sourceClassName: cls.name }
           : {}),
-      geometry: parseClassificationGeometry(context, raw, path),
+      geometry: parseClassificationGeometry(
+        context,
+        raw,
+        path,
+        imageWidth,
+        imageHeight,
+      ),
       synthesized: false,
       raw,
     };
@@ -901,17 +1205,38 @@ function parseClassificationGeometry(
   context: ParseContext,
   raw: JsonObject,
   path: string,
+  imageWidth: number | undefined,
+  imageHeight: number | undefined,
 ): LabelGeometryIR {
   const geometry: {
     box?: { x: number; y: number; width: number; height: number };
     contours?: readonly (readonly PointIR[])[];
+    bitmap?: string;
   } = {};
+  let hasGeometry = false;
+  let isVerifiedFullImage = true;
+
+  if (hasMeaningfulValue(raw.labelBitmap)) {
+    hasGeometry = true;
+    isVerifiedFullImage = false;
+    const bitmap = optionalString(raw.labelBitmap);
+    if (bitmap !== undefined) geometry.bitmap = bitmap;
+    reportUnsupportedClassificationGeometry(
+      context,
+      `${path}.labelBitmap`,
+      "Bitmap classification geometry cannot be represented by a V1 image-level class.",
+      "bitmap",
+    );
+  }
+
   if (hasBoxFields(raw)) {
+    hasGeometry = true;
     const x = finiteNumber(raw.labelPosX);
     const y = finiteNumber(raw.labelPosY);
     const width = positiveNumber(raw.labelWidth);
     const height = positiveNumber(raw.labelHeight);
     if (x === undefined || y === undefined || width === undefined || height === undefined) {
+      isVerifiedFullImage = false;
       invalid(
         context,
         path,
@@ -920,14 +1245,142 @@ function parseClassificationGeometry(
       );
     } else {
       geometry.box = { x, y, width, height };
+      if (!isFullImageBox(geometry.box, imageWidth, imageHeight)) {
+        isVerifiedFullImage = false;
+        reportUnsupportedClassificationGeometry(
+          context,
+          path,
+          imageWidth === undefined || imageHeight === undefined
+            ? "Classification box geometry cannot be verified as full-image because image dimensions are missing."
+            : "Classification box geometry covers less or more than the complete image.",
+          imageWidth === undefined || imageHeight === undefined
+            ? "dimensions-missing"
+            : "not-full-image",
+        );
+      }
     }
   }
   const contourValue = raw.labelContour ?? raw.labelPolygon;
   if (contourValue !== undefined) {
+    hasGeometry = true;
     const contours = parseContours(context, contourValue, path);
     if (contours.length > 0) geometry.contours = contours;
+    if (contours.length === 0) {
+      isVerifiedFullImage = false;
+    } else if (contours.length > 1) {
+      isVerifiedFullImage = false;
+      reportUnsupportedClassificationGeometry(
+        context,
+        `${path}.labelContour`,
+        "V1 Classification cannot preserve multiple contour rings or holes.",
+        "multiple-rings",
+      );
+    } else if (
+      contours.length === 1 &&
+      !isFullImageContour(contours[0]!, imageWidth, imageHeight)
+    ) {
+      isVerifiedFullImage = false;
+      reportUnsupportedClassificationGeometry(
+        context,
+        `${path}.labelContour`,
+        imageWidth === undefined || imageHeight === undefined
+          ? "Classification contour geometry cannot be verified as full-image because image dimensions are missing."
+          : "Classification contour geometry is not strictly equivalent to the complete image boundary.",
+        imageWidth === undefined || imageHeight === undefined
+          ? "dimensions-missing"
+          : "not-full-image",
+      );
+    }
+  }
+
+  if (hasGeometry && isVerifiedFullImage) {
+    compatibility(context, {
+      code: "V2_CLASSIFICATION_FULL_IMAGE_GEOMETRY",
+      disposition: "preserve",
+      severity: "info",
+      path,
+      message:
+        "Full-image classification geometry is semantically equivalent to the V1 image-level class.",
+    });
   }
   return geometry;
+}
+
+function reportUnsupportedClassificationGeometry(
+  context: ParseContext,
+  path: string,
+  message: string,
+  reason: string,
+): void {
+  compatibility(context, {
+    code: "V2_CLASSIFICATION_GEOMETRY_NOT_IN_V1",
+    disposition: "block",
+    severity: "error",
+    path,
+    message,
+    details: { reason },
+  });
+}
+
+function isFullImageBox(
+  box: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+  imageWidth: number | undefined,
+  imageHeight: number | undefined,
+): boolean {
+  return (
+    imageWidth !== undefined &&
+    imageHeight !== undefined &&
+    box.x === 0 &&
+    box.y === 0 &&
+    box.width === imageWidth &&
+    box.height === imageHeight
+  );
+}
+
+function isFullImageContour(
+  sourceRing: readonly PointIR[],
+  imageWidth: number | undefined,
+  imageHeight: number | undefined,
+): boolean {
+  if (imageWidth === undefined || imageHeight === undefined) return false;
+  const ring =
+    sourceRing.length > 1 && pointsEqual(sourceRing[0]!, sourceRing.at(-1)!)
+      ? sourceRing.slice(0, -1)
+      : sourceRing;
+  if (ring.length < 4) return false;
+
+  for (const point of ring) {
+    const onHorizontalEdge =
+      (point.y === 0 || point.y === imageHeight) &&
+      point.x >= 0 &&
+      point.x <= imageWidth;
+    const onVerticalEdge =
+      (point.x === 0 || point.x === imageWidth) &&
+      point.y >= 0 &&
+      point.y <= imageHeight;
+    if (!onHorizontalEdge && !onVerticalEdge) return false;
+  }
+
+  for (const [index, point] of ring.entries()) {
+    const next = ring[(index + 1) % ring.length]!;
+    if (pointsEqual(point, next)) return false;
+    const followsHorizontalBoundary =
+      point.y === next.y && (point.y === 0 || point.y === imageHeight);
+    const followsVerticalBoundary =
+      point.x === next.x && (point.x === 0 || point.x === imageWidth);
+    if (!followsHorizontalBoundary && !followsVerticalBoundary) return false;
+  }
+
+  let doubledArea = 0;
+  for (const [index, point] of ring.entries()) {
+    const next = ring[(index + 1) % ring.length]!;
+    doubledArea += point.x * next.y - next.x * point.y;
+  }
+  return Math.abs(doubledArea) === 2 * imageWidth * imageHeight;
+}
+
+function pointsEqual(left: PointIR, right: PointIR): boolean {
+  return left.x === right.x && left.y === right.y;
 }
 
 function reportClassificationStateConflict(
@@ -1021,6 +1474,9 @@ function parseContours(
   }
   let decoded: unknown = value;
   if (typeof value === "string") {
+    if (!preflightJsonText(context, value, `${path}.labelContour`, false)) {
+      return [];
+    }
     try {
       decoded = JSON.parse(value);
     } catch {
@@ -1033,6 +1489,9 @@ function parseContours(
       return [];
     }
   }
+  if (!validateJsonValueBudget(context, decoded, `${path}.labelContour`)) {
+    return [];
+  }
   const rings = normalizeRings(decoded);
   if (!rings || rings.length === 0 || rings.some((ring) => ring.length < 3)) {
     invalid(
@@ -1041,6 +1500,25 @@ function parseContours(
       "V2_CONTOUR_INVALID",
       "A contour requires at least three finite points per ring.",
     );
+    return [];
+  }
+  const contourPointCount = rings.reduce(
+    (total, ring) => total + ring.length,
+    0,
+  );
+  if (contourPointCount > V2_PROJECT_LIMITS.maxContourPoints) {
+    addDiagnostic(context, {
+      code: "V2_CONTOUR_POINT_LIMIT_EXCEEDED",
+      category: "security",
+      severity: "error",
+      disposition: "block",
+      path: `${path}.labelContour`,
+      message: `A V2 contour must not exceed ${V2_PROJECT_LIMITS.maxContourPoints} total points.`,
+      details: {
+        contourPointCount,
+        maximum: V2_PROJECT_LIMITS.maxContourPoints,
+      },
+    });
     return [];
   }
   return rings;
@@ -1302,6 +1780,38 @@ function validateArchive(
     fileName: input.fileName,
     diagnostics,
   };
+  if (input.entries.length > BROWSER_ARCHIVE_LIMITS.maxEntries) {
+    addDiagnostic(context, {
+      code: "V2_ARCHIVE_ENTRY_LIMIT_EXCEEDED",
+      category: "security",
+      severity: "error",
+      disposition: "block",
+      path: "$.archive.entries",
+      message: `A V2 archive must not contain more than ${BROWSER_ARCHIVE_LIMITS.maxEntries} entries.`,
+      details: {
+        actualCount: input.entries.length,
+        maximum: BROWSER_ARCHIVE_LIMITS.maxEntries,
+      },
+    });
+    return undefined;
+  }
+  if (
+    exceedsUtf8ByteLimit(
+      input.projectJsonEntryName,
+      PROJECT_PATH_MAX_BYTES,
+    )
+  ) {
+    addDiagnostic(context, {
+      code: "V2_ARCHIVE_ENTRY_NAME_LIMIT_EXCEEDED",
+      category: "security",
+      severity: "error",
+      disposition: "block",
+      path: "$.archive.projectJsonEntryName",
+      message: `Archive entry names must not exceed ${PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+      details: { maxBytes: PROJECT_PATH_MAX_BYTES },
+    });
+    return undefined;
+  }
   const projectEntry = normalizeSlashes(input.projectJsonEntryName);
   if (!isSafeArchivePath(projectEntry) || projectEntry.includes("/") || !projectEntry.endsWith(".json")) {
     addDiagnostic(context, {
@@ -1318,6 +1828,18 @@ function validateArchive(
   const entries = new Map<string, V2ArchiveEntry>();
   const caseFolded = new Map<string, string>();
   for (const [index, rawEntry] of input.entries.entries()) {
+    if (exceedsUtf8ByteLimit(rawEntry.name, PROJECT_PATH_MAX_BYTES)) {
+      addDiagnostic(context, {
+        code: "V2_ARCHIVE_ENTRY_NAME_LIMIT_EXCEEDED",
+        category: "security",
+        severity: "error",
+        disposition: "block",
+        path: `$.archive.entries[${index}].name`,
+        message: `Archive entry names must not exceed ${PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+        details: { maxBytes: PROJECT_PATH_MAX_BYTES },
+      });
+      continue;
+    }
     const name = normalizeSlashes(rawEntry.name);
     if (name.endsWith("/")) {
       const directoryName = name.slice(0, -1);
@@ -1462,6 +1984,53 @@ function reportKnownLosses(
       message: "Per-file V2 metadata is retained in raw data but is not emitted to V1.",
     });
   }
+  const fileRaw = files.map((file) => file.raw);
+  for (const field of ["modifiedDate", "assignedDate", "registeredDate"] as const) {
+    reportAggregatedFieldLoss(context, fileRaw, field, {
+      code: "V2_FILE_TIMESTAMP_NOT_IN_V1",
+      disposition: "drop",
+      severity: "warning",
+      path: `$.project.projectFiles[*].${field}`,
+      message: `Per-file V2 timestamp '${field}' is retained in raw data but is not emitted to V1.`,
+    });
+  }
+  const labelRaw = files.flatMap((file) => file.labels.map((label) => label.raw));
+  reportAggregatedFieldLoss(context, labelRaw, "labeledDate", {
+    code: "V2_LABEL_TIMESTAMP_NOT_IN_V1",
+    disposition: "drop",
+    severity: "warning",
+    path: "$.project.projectFiles[*].labelDataList[*].labeledDate",
+    message: "Per-label V2 labeledDate values are retained in raw data but are not emitted to V1.",
+  });
+  reportAggregatedFieldLoss(context, labelRaw, "contourId", {
+    code: "V2_CONTOUR_ID_REBUILT",
+    disposition: "rebuild",
+    severity: "info",
+    path: "$.project.projectFiles[*].labelDataList[*].contourId",
+    message: "V2 contourId values are retained as source data and regenerated after V1 conversion.",
+  });
+  const datasetSplitRaw = datasets.flatMap((dataset) => {
+    const splitSets = dataset.raw.splitSets;
+    return Array.isArray(splitSets) ? splitSets.filter(isJsonObject) : [];
+  });
+  const splitRaw = [
+    ...datasetSplitRaw,
+    ...files.flatMap((file) => file.splits.map((split) => split.raw)),
+  ];
+  reportAggregatedFieldLoss(context, splitRaw, "splitName", {
+    code: "V2_SPLIT_NAME_NOT_IN_V1",
+    disposition: "drop",
+    severity: "warning",
+    path: "$.project.projectFiles[*].splitSets[*].splitName",
+    message: "V2 splitName values are retained in raw data, but V1 preserves only SplitState.",
+  });
+  reportAggregatedFieldLoss(context, splitRaw, "splitId", {
+    code: "V2_SPLIT_ID_REBUILT",
+    disposition: "rebuild",
+    severity: "info",
+    path: "$.project.projectFiles[*].splitSets[*].splitId",
+    message: "V2 splitId values are retained as source IDs and regenerated after V1 conversion.",
+  });
   const generatedFiles = files.filter((file) => file.raw.isGenerated === true).length;
   const invalidGeneratedFlags = files.filter(
     (file) =>
@@ -1516,6 +2085,28 @@ function reportKnownLosses(
   }
 }
 
+function reportAggregatedFieldLoss(
+  context: ParseContext,
+  values: readonly JsonObject[],
+  field: string,
+  diagnostic: {
+    readonly code: string;
+    readonly disposition: CompatibilityDisposition;
+    readonly severity: DiagnosticSeverity;
+    readonly path: string;
+    readonly message: string;
+  },
+): void {
+  const affectedEntityCount = values.filter((raw) =>
+    hasMeaningfulValue(raw[field]),
+  ).length;
+  if (affectedEntityCount === 0) return;
+  compatibility(context, {
+    ...diagnostic,
+    details: { field, affectedEntityCount },
+  });
+}
+
 function reportRoiCompatibility(context: ParseContext, project: JsonObject): void {
   const mode = optionalString(project.roiMode)?.trim().toLocaleLowerCase("en-US");
   if (!mode || mode === "no") return;
@@ -1556,6 +2147,7 @@ function reportUnknownFields(
   owner: string,
 ): void {
   for (const key of Object.keys(raw)) {
+    if (projectDiagnosticsAreTruncated(context.diagnostics)) break;
     if (known.has(key)) continue;
     if (!hasMeaningfulValue(raw[key])) continue;
     compatibility(context, {
@@ -1690,8 +2282,8 @@ function nonNegativeInteger(value: unknown): number | undefined {
     : undefined;
 }
 
-function positiveInteger(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value > 0
+function positiveSafeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined;
 }
@@ -1798,7 +2390,7 @@ function compatibility(
 }
 
 function addDiagnostic(context: ParseContext, diagnostic: ProjectDiagnostic): void {
-  context.diagnostics.push(diagnostic);
+  appendBoundedProjectDiagnostic(context.diagnostics, diagnostic);
 }
 
 function hasFatalValidation(diagnostics: readonly ProjectDiagnostic[]): boolean {

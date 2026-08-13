@@ -10,6 +10,7 @@ import { openValidatedZip, type OpenArchive } from "../lib/archive/zip.ts";
 import {
   MAX_IMAGE_DIMENSION,
   enrichProjectImageDimensions,
+  verifyAndEnrichProjectImages,
   type ImageDimensionProgress,
 } from "../lib/files/imageDimensions.ts";
 import type { ProjectFileIR, ProjectIR } from "../lib/model/project.ts";
@@ -60,6 +61,12 @@ function resolved(fileIndex: number, bytes: Uint8Array): ResolvedProjectImage {
     originalPath: `C:\\images\\image_${fileIndex}.bin`,
     source: { kind: "blob", blob: new Blob([copy.buffer]) },
   };
+}
+
+function imageBlob(bytes: Uint8Array, type: string): Blob {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return new Blob([copy.buffer], { type });
 }
 
 function png(width: number, height: number): Uint8Array {
@@ -231,6 +238,46 @@ test("does not read files whose existing dimensions are valid", async () => {
   assert.equal(progressCalls, 0);
   assert.notEqual(result.project, input);
   assert.equal(result.project.files[0], unchanged);
+});
+
+test("verifies existing dimensions and rejects mismatched format and size", async () => {
+  const matching = file(0, { width: 12, height: 9 });
+  const wrongSize = file(1, { width: 11, height: 9 });
+  const wrongFormat = {
+    ...file(2, { width: 12, height: 9 }),
+    fileName: "wrong.png",
+    sourcePath: "C:/images/wrong.png",
+  };
+  const jpegBytes = jpeg(12, 9);
+  const result = await verifyAndEnrichProjectImages(
+    project([matching, wrongSize, wrongFormat]),
+    [
+      { fileIndex: 0, originalPath: matching.sourcePath, source: { kind: "blob", blob: imageBlob(png(12, 9), "image/png") } },
+      { fileIndex: 1, originalPath: wrongSize.sourcePath, source: { kind: "blob", blob: imageBlob(png(12, 9), "image/png") } },
+      { fileIndex: 2, originalPath: wrongFormat.sourcePath, source: { kind: "blob", blob: imageBlob(jpegBytes, "image/jpeg") } },
+    ],
+  );
+  assert.equal(result.complete, false);
+  assert.ok(result.issues.some((item) => item.code === "IMAGE_DIMENSIONS_MISMATCH"));
+  assert.ok(result.issues.some((item) => item.code === "IMAGE_FORMAT_MISMATCH"));
+  assert.equal(result.issues.some((item) => item.fileIndex === 0), false);
+});
+
+test("full verification enriches missing dimensions and honors abort", async () => {
+  const missing = file(0);
+  const result = await verifyAndEnrichProjectImages(project([missing]), [
+    { fileIndex: 0, originalPath: missing.sourcePath, source: { kind: "blob", blob: imageBlob(png(7, 5), "image/png") } },
+  ]);
+  assert.equal(result.complete, true);
+  assert.equal(result.project.files[0]?.width, 7);
+  assert.equal(result.project.files[0]?.height, 5);
+
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    verifyAndEnrichProjectImages(project([missing]), [], { signal: controller.signal }),
+    { name: "AbortError" },
+  );
 });
 
 test("streams an archive entry and retains only its dimensions", async () => {

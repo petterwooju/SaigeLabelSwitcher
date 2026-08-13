@@ -1,0 +1,98 @@
+{
+  "project": {
+    "projectId": 126,
+    "projectName": "native_classification_fixture",
+    "projectType": "cls",
+    "description": "Redacted fixture exported by the SaigeVision V2 2.7.8 UI",
+    "roiMode": "simple",
+    "roiPosX": 0,
+    "roiPosY": 0,
+    "roiWidth": 1,
+    "roiHeight": 1,
+    "roiShapeType": "rectangle",
+    "modifiedDate": 1786604562933,
+    "createdDate": 1786604562933,
+    "metadataList": [],
+    "classInfos": [
+      { "classId": 0, "className": "OK", "classNo": 0, "description": "", "classColor": "#00b050", "isNg": true },
+      { "classId": 1, "className": "color", "classNo": 1, "description": "", "classColor": "#f00000", "isNg": true },
+      { "classId": 2, "className": "combined", "classNo": 2, "description": "", "classColor": "#ffff00", "isNg": true },
+      { "classId": 3, "className": "contamination", "classNo": 3, "description": "", "classColor": "#92d050", "isNg": true },
+      { "classId": 4, "className": "crack", "classNo": 4, "description": "", "classColor": "#00b0f0", "isNg": true },
+      { "classId": 5, "className": "faulty_imprint", "classNo": 5, "description": "", "classColor": "#e36c09", "isNg": true },
+      { "classId": 6, "className": "pill_type", "classNo": 6, "description": "", "classColor": "#938953", "isNg": true },
+      { "classId": 7, "className": "scratch", "classNo": 7, "description": "", "classColor": "#d99694", "isNg": true }
+    ],
+    "datasets": [
+      {
+        "datasetId": 116,
+        "datasetName": "native_classification_fixture",
+        "description": "Imported from a V1 classification project",
+        "modifiedDate": 1786604562933,
+        "createdDate": 1786604562933,
+        "createdBy": "admin",
+        "projects": [],
+        "metadataList": [],
+        "splitSets": [
+          { "splitId": 193, "splitName": "srproj", "createdDate": 1786604562933 }
+        ]
+      }
+    ],
+    "projectFiles": [
+      {
+        "projectId": 126,
+        "fileId": 58377,
+        "filePath": "C:\\fixtures\\color\\000.png",
+        "isLabeled": true,
+        "modifiedDate": 1786604562963,
+        "assignedDate": 1786604562963,
+        "datasetName": "native_classification_fixture",
+        "width": 800,
+        "height": 800,
+        "className": "color",
+        "labelDataList": [
+          {
+            "labelId": 1,
+            "labelType": "man",
+            "labeledDate": 1786604562963,
+            "contourId": "5b7bf3cd-879c-4af9-924a-6225740f8743",
+            "className": "color"
+          }
+        ],
+        "metadata": [],
+        "registeredDate": 1786604562963,
+        "isGenerated": false,
+        "splitSets": [
+          { "splitId": 193, "splitName": "srproj", "splitType": "train" }
+        ]
+      },
+      {
+        "projectId": 126,
+        "fileId": 58378,
+        "filePath": "C:\\fixtures\\scratch\\001.png",
+        "isLabeled": true,
+        "modifiedDate": 1786604562964,
+        "assignedDate": 1786604562964,
+        "datasetName": "native_classification_fixture",
+        "width": 800,
+        "height": 800,
+        "className": "scratch",
+        "labelDataList": [
+          {
+            "labelId": 2,
+            "labelType": "man",
+            "labeledDate": 1786604562964,
+            "contourId": "eec93d84-e43a-465e-96d7-99e7f1ae4df9",
+            "className": "scratch"
+          }
+        ],
+        "metadata": [],
+        "registeredDate": 1786604562964,
+        "isGenerated": false,
+        "splitSets": [
+          { "splitId": 193, "splitName": "srproj", "splitType": "validation" }
+        ]
+      }
+    ]
+  }
+}

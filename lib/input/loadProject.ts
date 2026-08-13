@@ -15,6 +15,13 @@ import type {
   ProjectParseResult,
   ProjectSourceFormat,
 } from "../model/project.ts";
+import {
+  BROWSER_ARCHIVE_LIMITS,
+  exceedsUtf8ByteLimit,
+  inspectJsonResourceUsage,
+  PROJECT_PATH_MAX_BYTES,
+  PROJECT_TEXT_MAX_BYTES,
+} from "../security/resourceLimits.ts";
 import { parseV1Srproj } from "./v1.ts";
 import {
   parseV2SubvisionProject,
@@ -66,14 +73,19 @@ export class ProjectLoadError extends Error {
 
 export const LoadProjectError = ProjectLoadError;
 
-const MAX_PLAIN_PROJECT_BYTES = 128 * 1024 ** 2;
+const MAX_PLAIN_PROJECT_BYTES = PROJECT_TEXT_MAX_BYTES;
 const MANIFEST_NAME = "svpa_manifest.json";
 
 /**
  * Load a browser File by its bytes, never by its suffix. ZIP images stay lazy
  * in OpenArchive and are not inflated during format detection or parsing.
  */
-export async function loadProject(sourceFile: File): Promise<LoadedProject> {
+export async function loadProject(
+  sourceFile: File,
+  options: { readonly signal?: AbortSignal } = {},
+): Promise<LoadedProject> {
+  const { signal } = options;
+  throwIfAborted(signal);
   if (!(sourceFile instanceof Blob)) {
     throw new ProjectLoadError(
       "INPUT_NOT_FILE",
@@ -84,10 +96,12 @@ export async function loadProject(sourceFile: File): Promise<LoadedProject> {
   const signature = new Uint8Array(
     await sourceFile.slice(0, Math.min(sourceFile.size, 4)).arrayBuffer(),
   );
+  throwIfAborted(signal);
   if (hasZipSignature(signature)) {
     const archive = await openValidatedZip(sourceFile);
     try {
-      return await loadArchiveProject(sourceFile, archive);
+      throwIfAborted(signal);
+      return await loadArchiveProject(sourceFile, archive, signal);
     } catch (error) {
       await archive.close().catch(() => undefined);
       throw error;
@@ -102,7 +116,7 @@ export async function loadProject(sourceFile: File): Promise<LoadedProject> {
     );
   }
 
-  const text = await readUtf8File(sourceFile);
+  const text = await readUtf8File(sourceFile, signal);
   const first = stripBom(text).trimStart()[0];
   if (first === "<") {
     const result = withExtensionDiagnostic(
@@ -141,7 +155,9 @@ export async function loadProject(sourceFile: File): Promise<LoadedProject> {
 async function loadArchiveProject(
   sourceFile: File,
   archive: OpenArchive,
+  signal?: AbortSignal,
 ): Promise<LoadedProject> {
+  throwIfAborted(signal);
   const names = archive.names();
   const manifestCandidates = names.filter(
     (name) => leafName(name).toLocaleLowerCase() === MANIFEST_NAME,
@@ -157,7 +173,7 @@ async function loadArchiveProject(
         { manifestCount: manifestCandidates.length },
       );
     }
-    return loadSvpaProject(sourceFile, archive, manifestCandidates[0]);
+    return loadSvpaProject(sourceFile, archive, manifestCandidates[0], signal);
   }
 
   const rootJsonEntries = names.filter(
@@ -172,7 +188,8 @@ async function loadArchiveProject(
   }
 
   const projectJsonEntry = rootJsonEntries[0];
-  const projectJsonText = await archive.readText(projectJsonEntry);
+  const projectJsonText = await archive.readText(projectJsonEntry, undefined, signal);
+  throwIfAborted(signal);
   const result = withExtensionDiagnostic(
     parseV2VisionProject({
       projectJsonText,
@@ -198,10 +215,17 @@ async function loadSvpaProject(
   sourceFile: File,
   archive: OpenArchive,
   manifestEntryName: string,
+  signal?: AbortSignal,
 ): Promise<LoadedProject> {
-  const manifestText = await archive.readText(manifestEntryName);
+  const manifestText = await archive.readText(manifestEntryName, undefined, signal);
+  throwIfAborted(signal);
   const manifest = parseSvpaManifest(manifestText, archive);
-  const projectXmlText = await archive.readText(manifest.ProjectFile);
+  const projectXmlText = await archive.readText(
+    manifest.ProjectFile,
+    undefined,
+    signal,
+  );
+  throwIfAborted(signal);
   let result = parseV1Srproj({
     xmlText: projectXmlText,
     fileName: leafName(manifest.ProjectFile),
@@ -230,6 +254,14 @@ function parseSvpaManifest(text: string, archive: OpenArchive): SvpaManifest {
       "SVPA_MANIFEST_JSON_INVALID",
       "svpa_manifest.json is not valid JSON.",
       { reason: error instanceof Error ? error.message : String(error) },
+    );
+  }
+  const usage = inspectJsonResourceUsage(value);
+  if (!usage.ok) {
+    throw new ProjectLoadError(
+      "SVPA_MANIFEST_RESOURCE_LIMIT",
+      `svpa_manifest.json exceeds the safe JSON ${usage.reason} limit.`,
+      { valueCount: usage.valueCount, maximumDepth: usage.maximumDepth },
     );
   }
   if (!isJsonObject(value)) {
@@ -265,6 +297,17 @@ function parseSvpaManifest(text: string, archive: OpenArchive): SvpaManifest {
       "SVPA OriginalProjectDirectory must be a string.",
     );
   }
+  if (
+    exceedsUtf8ByteLimit(
+      value.OriginalProjectDirectory,
+      PROJECT_PATH_MAX_BYTES,
+    )
+  ) {
+    throw new ProjectLoadError(
+      "SVPA_ORIGINAL_DIRECTORY_INVALID",
+      "SVPA OriginalProjectDirectory exceeds the safe path length limit.",
+    );
+  }
   const originalProjectDirectory =
     value.OriginalProjectDirectory === ""
       ? ""
@@ -277,6 +320,13 @@ function parseSvpaManifest(text: string, archive: OpenArchive): SvpaManifest {
     throw new ProjectLoadError(
       "SVPA_ENTRIES_INVALID",
       "SVPA Entries must be an array.",
+    );
+  }
+  if (value.Entries.length > BROWSER_ARCHIVE_LIMITS.maxEntries) {
+    throw new ProjectLoadError(
+      "SVPA_ENTRIES_TOO_MANY",
+      `SVPA Entries exceeds the safe limit (${BROWSER_ARCHIVE_LIMITS.maxEntries}).`,
+      { count: value.Entries.length },
     );
   }
 
@@ -406,6 +456,7 @@ function bindSvpaImages(
       fileName: outerFileName,
     },
     files,
+    compatibility: result.compatibility,
   };
   return { ...result, project };
 }
@@ -499,6 +550,12 @@ function requiredString(value: JsonValue | undefined, path: string): string {
       `SVPA manifest '${path}' must not have surrounding whitespace.`,
     );
   }
+  if (exceedsUtf8ByteLimit(value, PROJECT_PATH_MAX_BYTES)) {
+    throw new ProjectLoadError(
+      "SVPA_MANIFEST_FIELD_INVALID",
+      `SVPA manifest '${path}' exceeds the safe path length limit.`,
+    );
+  }
   return value;
 }
 
@@ -525,6 +582,13 @@ function normalizeExternalPath(
   code: string,
 ): string {
   const parsed = parseExternalPath(value, code);
+  if (!parsed.absolute && !baseDirectory && parsed.segments.includes("..")) {
+    throw new ProjectLoadError(
+      code,
+      "Relative parent traversal requires a trusted original project directory.",
+      { path: value },
+    );
+  }
   let parts = parsed;
   if (!parsed.absolute && baseDirectory) {
     const base = parseExternalPath(baseDirectory, code);
@@ -550,7 +614,8 @@ function normalizeExternalPath(
 
 function parseExternalPath(value: string, code: string): ExternalPathParts {
   const unquoted = stripExternalPathQuotes(value, code);
-  const slashed = unquoted.normalize("NFC").replaceAll("\\", "/");
+  const externalPath = decodeFileUrl(unquoted, code);
+  const slashed = externalPath.normalize("NFC").replaceAll("\\", "/");
   if (!slashed || slashed.includes("\0")) {
     throw new ProjectLoadError(code, "External image path is empty or contains NUL.", {
       path: value,
@@ -603,6 +668,27 @@ function parseExternalPath(value: string, code: string): ExternalPathParts {
     absolute,
     segments: collapseExternalSegments(rawSegments, absolute, value, code),
   };
+}
+
+function decodeFileUrl(value: string, code: string): string {
+  if (!/^file:\/\//iu.test(value)) return value;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "file:" || url.username || url.password || url.search || url.hash) {
+      throw new Error("Unsupported file URL components.");
+    }
+    const decodedPath = decodeURIComponent(url.pathname);
+    const host = url.hostname;
+    if (host && host.toLocaleLowerCase("en-US") !== "localhost") {
+      return `//${host}${decodedPath}`;
+    }
+    return /^\/[a-z]:\//iu.test(decodedPath) ? decodedPath.slice(1) : decodedPath;
+  } catch (error) {
+    throw new ProjectLoadError(code, "External file URL is invalid.", {
+      path: value,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function collapseExternalSegments(
@@ -696,14 +782,34 @@ function hasZipSignature(bytes: Uint8Array): boolean {
   );
 }
 
-async function readUtf8File(file: File): Promise<string> {
+async function readUtf8File(file: File, signal?: AbortSignal): Promise<string> {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+    throwIfAborted(signal);
+    const bytes = await file.arrayBuffer();
+    throwIfAborted(signal);
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (error) {
+    if (isAbortError(error)) throw error;
     throw new ProjectLoadError(
       "PROJECT_TEXT_UTF8_INVALID",
       "Plain project files must be valid UTF-8.",
       { reason: error instanceof Error ? error.message : String(error) },
     );
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("The operation was aborted.", "AbortError");
+}
+
+function isAbortError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "name" in error &&
+      (error as { name?: unknown }).name === "AbortError",
+  );
 }

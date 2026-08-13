@@ -218,3 +218,47 @@ test("rejects active XML declarations and blocks unverified DET mapping", () => 
     );
   }
 });
+
+test("V1 writer enforces parser compatibility unless loss was confirmed", () => {
+  const parsed = parseV1Srproj(classificationFixture);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+
+  const blocked: ProjectIR = {
+    ...parsed.project,
+    compatibility: {
+      target: "v1",
+      status: "blocked",
+      preserveCount: 0,
+      rebuildCount: 0,
+      degradeCount: 0,
+      dropCount: 0,
+      blockCount: 1,
+    },
+  };
+  assert.throws(
+    () => writeSrproj(blocked),
+    (error) =>
+      error instanceof SrprojWriteError &&
+      error.code === "SRPROJ_COMPATIBILITY_BLOCKED",
+  );
+
+  const needsConfirmation: ProjectIR = {
+    ...blocked,
+    compatibility: {
+      ...blocked.compatibility!,
+      status: "confirmation-required",
+      dropCount: 1,
+      blockCount: 0,
+    },
+  };
+  assert.throws(
+    () => writeSrproj(needsConfirmation),
+    (error) =>
+      error instanceof SrprojWriteError &&
+      error.code === "SRPROJ_CONFIRMATION_REQUIRED",
+  );
+  assert.doesNotThrow(() =>
+    writeSrproj(needsConfirmation, { allowConfirmedLoss: true }),
+  );
+});

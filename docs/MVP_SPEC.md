@@ -1,7 +1,7 @@
 # SaigeVision 项目双向转换器 Webapp — MVP 规格
 
-> 版本：0.2  
-> 日期：2026-08-13  
+> 版本：0.3
+> 日期：2026-08-14
 > 状态：Classification MVP 已实现；Detection / Segmentation 等待 golden fixtures
 
 ## 1. 产品结论
@@ -18,7 +18,7 @@ V2 .visionproj / .subvisionproj
 
 1. V1 `.srproj` → V2 `.visionproj` / `.subvisionproj`。
 2. V1 SVPA `.zip` → V2 `.visionproj` / `.subvisionproj`。
-3. V2 `.visionproj` → V1 SVPA `.zip`；仅在路径条件满足时输出独立 `.srproj`。
+3. V2 `.visionproj` → V1 SVPA `.zip`；不输出引用包内虚拟路径的独立 `.srproj`。
 4. V2 `.subvisionproj` → V1 `.srproj`；补齐图片后可输出 SVPA `.zip`。
 5. 裸 `.srproj` → SVPA `.zip`，保留现有 V1 打包能力。
 
@@ -35,22 +35,25 @@ V2 .visionproj / .subvisionproj
 - `.srproj` 需要图片路径。V2→V1 时采用“目标路径策略”，不得把 `.visionproj` 内部的 `images/...` ZIP 路径误写成可长期使用的本机绝对路径。
 - V2 可能包含 V1 无法表达的数据。反向转换必须先生成兼容性报告；关键字段无法表示时阻止，非关键字段丢失时要求用户明确确认。
 - 任意图片、类别、Split 或标注无法可靠映射时禁止静默丢弃。
+- 当前 Classification 图片白名单为 PNG、JPEG、BMP、GIF、WebP；完整输出逐张核对图片头、真实宽高和项目声明。
+- XML/JSON 项目文本最大 16 MiB；解析器同时限制深度、节点/字段、类别、图片、标签和诊断数量。ZIP 按条目数、单项/总展开大小、压缩比、名称长度及实际读取字节进行双层限制。
+- 所有大图片保持流式复制；保存、解压、目录扫描和图片验证支持协同取消。ZIP64 同时按总字节和条目数启用。
 
 ## 3. 输入—输出能力矩阵
 
 | 输入 | `.visionproj` | `.subvisionproj` | `.srproj` | SVPA `.zip` |
 |---|---:|---:|---:|---:|
 | V1 `.srproj` | 需补图片 | 直接 | — | 需补图片 |
-| V1 SVPA `.zip` | 直接 | 直接 | 可提取原项目 | — |
-| V2 `.visionproj` | — | 直接 | 有可用外部路径时 | 直接 |
-| V2 `.subvisionproj` | 需补图片 | — | 可转换 | 需补图片 |
+| V1 SVPA `.zip` | 直接 | 直接 | — | — |
+| V2 `.visionproj` | — | — | — | 直接 |
+| V2 `.subvisionproj` | — | — | 可转换 | 需补图片 |
 
 说明：
 
 - “直接”仍包含格式解析、结构校验和兼容性检查。
 - `.subvisionproj → .srproj` 可以保留其 `projectFiles[].filePath`。如果这些路径只是相对路径或已经失效，输出 `.srproj` 可以生成，但页面必须警告项目在 V1 中可能找不到图片。
-- `.visionproj → .srproj` 只有在输入保留可用外部图片路径，或用户指定并实际导出图片目标目录时才提供。通常 `.visionproj` 只保存 `images/...` 包内路径，因此默认推荐并始终提供 SVPA ZIP；不得生成引用 ZIP 内部虚拟路径的不可用 `.srproj`。
-- 同版本的容器互转可作为次要功能；主目标仍是 V1/V2 双向迁移。
+- `.visionproj → .srproj` 当前不开放。通常 `.visionproj` 只保存 `images/...` 包内路径，浏览器保存句柄也不能提供可写入 XML 的持久绝对目录；因此只提供自包含 SVPA ZIP，绝不生成引用 ZIP 内虚拟路径的不可用 `.srproj`。
+- 页面只展示跨版本且经过验证的目标；不提供同版本换容器或“提取原文件”的次要入口。
 
 ## 4. 关键用户故事
 
@@ -223,7 +226,8 @@ MVP 策略：
 - `更换` 次要操作。
 - 只展示合法目标：
   - V1 输入：`.visionproj` / `.subvisionproj`；完整匹配后另有 `仅导出 V1 项目 ZIP`。
-  - V2 输入：始终提供 `SVPA.zip`；仅在 `hasUsableExternalPaths` 为真或用户选择图片导出目标目录时提供 `.srproj`。
+  - V2 `.visionproj`：提供自包含 `SVPA.zip`；不提供路径不可用的独立 `.srproj`。
+  - V2 `.subvisionproj`：提供 `.srproj`；补齐图片后也提供 `SVPA.zip`。
 - 默认选择跨版本、可迁移性更完整的含图输出：V1→V2 默认 `.visionproj`；V2→V1 默认 SVPA ZIP。
 
 ### 8.3 按需补图
@@ -351,7 +355,7 @@ flowchart LR
 | `.srproj` | SVPA ZIP | 选择目录 | ZipFixer/V1 兼容 |
 | SVPA ZIP | `.visionproj` | 包内 | 流式转换，V2 导入 |
 | SVPA ZIP | `.subvisionproj` | 无 | manifest 原路径，V2 导入 |
-| `.visionproj` | `.srproj` | 外部路径或导出目标目录 | 路径条件满足时 V1 打开；否则隐藏该输出 |
+| `.visionproj` | SVPA ZIP | 包内图片 | 解压、修复后由 V1 打开；不生成路径不可用的裸 `.srproj` |
 | `.visionproj` | SVPA ZIP | 包内 | ZipFixer 后 V1 打开 |
 | `.subvisionproj` | `.srproj` | 无 | 保留源路径，V1 打开或明确缺图告警 |
 | `.subvisionproj` | SVPA ZIP | 选择目录 | 100% 匹配，V1 打开 |

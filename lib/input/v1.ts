@@ -12,6 +12,16 @@ import type {
   ProjectType,
   SplitType,
 } from "../model/project.ts";
+import {
+  appendBoundedProjectDiagnostic,
+  exceedsUtf8ByteLimit,
+  PROJECT_DIAGNOSTIC_MAX_COUNT,
+  PROJECT_PATH_MAX_BYTES,
+  PROJECT_STRUCTURE_MAX_DEPTH,
+  projectDiagnosticsAreTruncated,
+  PROJECT_TEXT_MAX_BYTES,
+  V1_PROJECT_LIMITS,
+} from "../security/resourceLimits.ts";
 
 export interface V1SrprojInput {
   readonly xmlText: string;
@@ -51,8 +61,6 @@ class XmlSyntaxError extends Error {
   }
 }
 
-const MAX_XML_DEPTH = 128;
-
 const CORE_ROOT_ELEMENTS = new Set([
   "Version",
   "Type",
@@ -83,6 +91,17 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
     unknownNodes: [],
   };
 
+  if (exceedsUtf8ByteLimit(normalizedInput.xmlText, PROJECT_TEXT_MAX_BYTES)) {
+    resourceLimit(
+      context,
+      "$",
+      "V1_TEXT_LIMIT_EXCEEDED",
+      `V1 XML exceeds the ${PROJECT_TEXT_MAX_BYTES}-byte UTF-8 text limit.`,
+      { maxBytes: PROJECT_TEXT_MAX_BYTES },
+    );
+    return failure(context.diagnostics);
+  }
+
   let root: XmlElement;
   try {
     root = parseXml(source);
@@ -91,7 +110,7 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
       error instanceof XmlSyntaxError
         ? error
         : new XmlSyntaxError("V1_INVALID_XML", String(error), 0);
-    context.diagnostics.push({
+    addDiagnostic(context, {
       code: syntax.code,
       category: syntax.category,
       severity: "error",
@@ -199,6 +218,7 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
   const modifiedAt = modifiedDate
     ? parseV1DateAsUtcMilliseconds(modifiedDate)
     : undefined;
+  const compatibilitySummary = summarizeCompatibility(context.diagnostics);
   const project: ProjectIR = {
     schemaVersion: 1,
     source: {
@@ -221,13 +241,14 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
     datasets: [],
     files: filesResult.files,
     raw: { Project: projectRaw },
+    compatibility: compatibilitySummary,
   };
 
   return {
     ok: true,
     project,
     diagnostics: context.diagnostics,
-    compatibility: summarizeCompatibility(context.diagnostics),
+    compatibility: compatibilitySummary,
   };
 }
 
@@ -256,6 +277,23 @@ function parseClasses(
     "V1_CLASS_COUNT_INVALID",
   );
   const classNodes = childElements(group, "Class");
+  if (
+    classNodes.length > V1_PROJECT_LIMITS.maxClasses ||
+    (declaredCount !== undefined && declaredCount > V1_PROJECT_LIMITS.maxClasses)
+  ) {
+    resourceLimit(
+      context,
+      path,
+      "V1_CLASS_LIMIT_EXCEEDED",
+      `V1 class count must not exceed ${V1_PROJECT_LIMITS.maxClasses}.`,
+      {
+        declaredCount: declaredCount ?? null,
+        actualCount: classNodes.length,
+        maxClasses: V1_PROJECT_LIMITS.maxClasses,
+      },
+    );
+    return undefined;
+  }
   const classes: ProjectClassIR[] = [];
   const names = new Set<string>();
 
@@ -325,6 +363,41 @@ function parseImages(
     "V1_IMAGE_COUNT_INVALID",
   );
   const imageNodes = childElements(group, "Image");
+  if (
+    imageNodes.length > V1_PROJECT_LIMITS.maxFiles ||
+    (declaredCount !== undefined && declaredCount > V1_PROJECT_LIMITS.maxFiles)
+  ) {
+    resourceLimit(
+      context,
+      path,
+      "V1_FILE_LIMIT_EXCEEDED",
+      `V1 image count must not exceed ${V1_PROJECT_LIMITS.maxFiles}.`,
+      {
+        declaredCount: declaredCount ?? null,
+        actualCount: imageNodes.length,
+        maxFiles: V1_PROJECT_LIMITS.maxFiles,
+      },
+    );
+    return undefined;
+  }
+  const overlongPathCount = imageNodes.filter((node) => {
+    const pathNodes = childElements(node, "Path");
+    if (pathNodes.length !== 1 || pathNodes[0]!.children.length > 0) return false;
+    return exceedsUtf8ByteLimit(
+      pathNodes[0]!.textParts.join("").trim(),
+      PROJECT_PATH_MAX_BYTES,
+    );
+  }).length;
+  if (overlongPathCount > 0) {
+    resourceLimit(
+      context,
+      `${path}.Image[*].Path`,
+      "V1_PATH_LIMIT_EXCEEDED",
+      `V1 image paths must not exceed ${PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+      { overlongPathCount, maxBytes: PROJECT_PATH_MAX_BYTES },
+    );
+    return undefined;
+  }
   const files: ProjectFileIR[] = [];
 
   for (const [index, node] of imageNodes.entries()) {
@@ -674,6 +747,7 @@ function reportPreservedNoopMasking(
   node: XmlElement,
   path: string,
 ): void {
+  if (projectDiagnosticsAreTruncated(context.diagnostics)) return;
   const completeOuterXml = context.source.slice(node.start, node.end);
   const outerXml = completeOuterXml.slice(0, 1024);
   const details: Record<string, JsonValue> = {
@@ -682,7 +756,9 @@ function reportPreservedNoopMasking(
     truncated: completeOuterXml.length > outerXml.length,
     mappedRoiMode: "no",
   };
-  context.unknownNodes.push({ path, ...details });
+  if (context.unknownNodes.length < PROJECT_DIAGNOSTIC_MAX_COUNT) {
+    context.unknownNodes.push({ path, ...details });
+  }
   compatibility(context, {
     code: "V1_MASKING_NOT_SET",
     severity: "info",
@@ -719,6 +795,7 @@ function reportUnmappedNode(
   path: string,
   code: string,
 ): void {
+  if (projectDiagnosticsAreTruncated(context.diagnostics)) return;
   const completeOuterXml = context.source.slice(node.start, node.end);
   const outerXml = completeOuterXml.slice(0, 1024);
   const details: Record<string, JsonValue> = {
@@ -726,7 +803,9 @@ function reportUnmappedNode(
     outerXml,
     truncated: completeOuterXml.length > outerXml.length,
   };
-  context.unknownNodes.push({ path, ...details });
+  if (context.unknownNodes.length < PROJECT_DIAGNOSTIC_MAX_COUNT) {
+    context.unknownNodes.push({ path, ...details });
+  }
   compatibility(context, {
     code,
     severity: "warning",
@@ -743,13 +822,16 @@ function reportUnknownAttributes(
   path: string,
 ): void {
   for (const [name, value] of element.attributes) {
+    if (projectDiagnosticsAreTruncated(context.diagnostics)) break;
     const attributePath = `${path}.@${name}`;
     const details: Record<string, JsonValue> = {
       nodeName: element.name,
       attributeName: name,
       value,
     };
-    context.unknownNodes.push({ path: attributePath, ...details });
+    if (context.unknownNodes.length < PROJECT_DIAGNOSTIC_MAX_COUNT) {
+      context.unknownNodes.push({ path: attributePath, ...details });
+    }
     compatibility(context, {
       code: "V1_UNKNOWN_XML_ATTRIBUTE",
       severity: "warning",
@@ -768,7 +850,7 @@ function invalid(
   message: string,
   details?: Readonly<Record<string, JsonValue>>,
 ): void {
-  context.diagnostics.push({
+  addDiagnostic(context, {
     code,
     category: "validation",
     severity: "error",
@@ -783,7 +865,29 @@ function compatibility(
   context: ParseContext,
   input: Omit<ProjectDiagnostic, "category">,
 ): void {
-  context.diagnostics.push({ category: "compatibility", ...input });
+  addDiagnostic(context, { category: "compatibility", ...input });
+}
+
+function resourceLimit(
+  context: ParseContext,
+  path: string,
+  code: string,
+  message: string,
+  details?: Readonly<Record<string, JsonValue>>,
+): void {
+  addDiagnostic(context, {
+    code,
+    category: "security",
+    severity: "error",
+    disposition: "block",
+    path,
+    message,
+    ...(details ? { details } : {}),
+  });
+}
+
+function addDiagnostic(context: ParseContext, diagnostic: ProjectDiagnostic): void {
+  appendBoundedProjectDiagnostic(context.diagnostics, diagnostic);
 }
 
 function hasFatalValidation(diagnostics: readonly ProjectDiagnostic[]): boolean {
@@ -887,6 +991,8 @@ function parseXml(source: string): XmlElement {
 
   const roots: XmlElement[] = [];
   const stack: XmlElement[] = [];
+  let nodeCount = 0;
+  let attributeCount = 0;
   let cursor = 0;
 
   while (cursor < source.length) {
@@ -941,7 +1047,20 @@ function parseXml(source: string): XmlElement {
       continue;
     }
 
-    const parsed = parseStartTag(token, opening);
+    const parsed = parseStartTag(
+      token,
+      opening,
+      V1_PROJECT_LIMITS.maxAttributes - attributeCount,
+    );
+    nodeCount += 1;
+    if (nodeCount > V1_PROJECT_LIMITS.maxNodes) {
+      throw xmlLimitError(
+        "V1_XML_NODE_LIMIT_EXCEEDED",
+        `XML element count exceeds ${V1_PROJECT_LIMITS.maxNodes}.`,
+        opening,
+      );
+    }
+    attributeCount += parsed.attributes.size;
     const node: XmlElement = {
       name: parsed.name,
       attributes: parsed.attributes,
@@ -954,11 +1073,16 @@ function parseXml(source: string): XmlElement {
     if (parent) parent.children.push(node);
     else roots.push(node);
 
+    const nodeDepth = stack.length + 1;
+    if (nodeDepth > PROJECT_STRUCTURE_MAX_DEPTH) {
+      throw xmlLimitError(
+        "V1_XML_DEPTH_LIMIT_EXCEEDED",
+        `XML nesting exceeds ${PROJECT_STRUCTURE_MAX_DEPTH} levels.`,
+        opening,
+      );
+    }
     if (!parsed.selfClosing) {
       stack.push(node);
-      if (stack.length > MAX_XML_DEPTH) {
-        throw xmlError(`XML nesting exceeds ${MAX_XML_DEPTH} levels.`, opening);
-      }
     }
     cursor = close + 1;
   }
@@ -1001,6 +1125,7 @@ function findTagEnd(source: string, start: number): number {
 function parseStartTag(
   token: string,
   offset: number,
+  remainingAttributeBudget: number,
 ): {
   readonly name: string;
   readonly attributes: ReadonlyMap<string, string>;
@@ -1037,6 +1162,13 @@ function parseStartTag(
     if (valueEnd < 0) throw xmlError(`Attribute '${attributeName}' is unterminated.`, offset + cursor);
     const value = decodeXmlEntities(source.slice(valueStart, valueEnd), offset + valueStart);
     attributes.set(attributeName, value);
+    if (attributes.size > remainingAttributeBudget) {
+      throw xmlLimitError(
+        "V1_XML_ATTRIBUTE_LIMIT_EXCEEDED",
+        `XML attribute count exceeds ${V1_PROJECT_LIMITS.maxAttributes}.`,
+        offset + cursor,
+      );
+    }
     cursor = valueEnd + 1;
   }
   return { name, attributes, selfClosing };
@@ -1105,4 +1237,8 @@ function isXmlName(value: string): boolean {
 
 function xmlError(message: string, offset: number): XmlSyntaxError {
   return new XmlSyntaxError("V1_INVALID_XML", message, Math.max(0, offset));
+}
+
+function xmlLimitError(code: string, message: string, offset: number): XmlSyntaxError {
+  return new XmlSyntaxError(code, message, Math.max(0, offset), "security");
 }

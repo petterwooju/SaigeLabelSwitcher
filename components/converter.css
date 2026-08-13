@@ -496,6 +496,13 @@
   font-size: 12px;
 }
 
+.converter-image-actions__clear {
+  justify-self: center;
+  min-height: 30px;
+  padding-block: 4px;
+  font-size: 12px;
+}
+
 .converter-image-actions small {
   color: var(--converter-muted);
   font-size: 11px;
@@ -741,9 +748,21 @@
   font-variant-numeric: tabular-nums;
 }
 
-.converter-work__heading > span:last-child {
+.converter-work__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.converter-work__actions > span {
   color: var(--converter-muted);
   font-size: 12px;
+}
+
+.converter-work__cancel {
+  min-height: 32px;
+  padding: 5px 10px;
 }
 
 .converter-inline-message,
@@ -814,6 +833,16 @@
 .converter-success__mark {
   width: 44px;
   height: 44px;
+}
+
+.converter-success__filename {
+  display: block;
+  max-width: 100%;
+  margin-top: 7px;
+  overflow-wrap: anywhere;
+  color: var(--converter-text);
+  font-size: 12px;
+  white-space: normal;
 }
 
 .converter-visually-hidden {
@@ -939,8 +968,9 @@
     grid-template-columns: 18px minmax(0, 1fr);
   }
 
-  .converter-work__heading > span:last-child {
+  .converter-work__actions {
     grid-column: 2;
+    justify-content: space-between;
   }
 
   .converter-card__actions p {

@@ -13,6 +13,8 @@ const eslintConfig = defineConfig([
     "dist/**",
     "out/**",
     "build/**",
+    "vendor/image-size-safe/bin/**",
+    "vendor/image-size-safe/dist/**",
     "next-env.d.ts",
   ]),
   eslint.configs.recommended,

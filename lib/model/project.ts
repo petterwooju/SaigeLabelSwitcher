@@ -209,6 +209,12 @@ export interface ProjectIR {
   readonly files: readonly ProjectFileIR[];
   /** Entire parsed JSON root, retained for audit and future adapters. */
   readonly raw: JsonObject;
+  /**
+   * Loss analysis produced by the parser that created this IR. Writers use
+   * this value as a last-line safety gate so callers cannot bypass a blocked
+   * cross-version conversion by passing the normalized project directly.
+   */
+  readonly compatibility?: CompatibilitySummary;
 }
 
 export interface ProjectParseSuccess {

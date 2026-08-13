@@ -3,8 +3,10 @@
 import {
   type ChangeEvent,
   type DragEvent,
+  useEffect,
   useId,
   useRef,
+  type RefObject,
 } from "react";
 import "./converter.css";
 
@@ -74,12 +76,15 @@ export interface ImageMatchIssue {
 
 export interface ImageMatchSummary {
   readonly state: ImageMatchState;
+  /** Whether selected images are packaged or only inspected for missing dimensions. */
+  readonly purpose: "package" | "dimensions";
   readonly totalCount: number;
   readonly matchedCount: number;
   readonly missingCount: number;
   readonly ambiguousCount: number;
   readonly matchedBytes?: number;
   readonly directoryCount?: number;
+  readonly hasSelectedSources?: boolean;
   readonly canSelectDirectory?: boolean;
   readonly issues?: readonly ImageMatchIssue[];
 }
@@ -116,6 +121,12 @@ export interface ConverterProgress {
   readonly detail?: string;
 }
 
+export interface ConverterSaveResult {
+  readonly mode: "direct" | "download";
+  readonly fileName: string;
+  readonly size?: number;
+}
+
 export interface ConverterShellProps {
   readonly language: ConverterLanguage;
   readonly status: ConverterStatus;
@@ -125,6 +136,7 @@ export interface ConverterShellProps {
   readonly diagnostics?: readonly ConverterDiagnostic[];
   readonly confirmation?: ConverterConfirmation | null;
   readonly progress?: ConverterProgress | null;
+  readonly saveResult?: ConverterSaveResult | null;
   readonly canSave?: boolean;
   readonly onSelectFile: (files: readonly File[]) => void;
   readonly onDrop: (files: readonly File[]) => void;
@@ -132,7 +144,9 @@ export interface ConverterShellProps {
   readonly onSelectDirectory: () => void;
   readonly onSelectImageFiles: () => void;
   readonly onSelectImageZip: () => void;
+  readonly onClearImageSources: () => void;
   readonly onSave: () => void;
+  readonly onCancel: () => void;
   readonly onReset: () => void;
   readonly onLanguageChange: (language: ConverterLanguage) => void;
   readonly onConfirmationChange: (checked: boolean) => void;
@@ -161,12 +175,14 @@ const copy = {
     recommended: "推荐",
     imageHeading: "项目图片",
     imageHelp: "完整项目需要读取全部原图。图片分散时可继续添加目录。",
+    imageHelpDimensions: "图片只用于读取缺失的宽高信息，不会打包进 .subvisionproj。",
     sourceImagesReady: "图片已就绪",
     sourceImagesReadyDetail: "已从源项目读取全部图片，无需另选目录。",
     selectDirectory: "选择图片目录",
     addDirectory: "继续添加目录",
     selectImageFiles: "选择图片文件",
     selectImageZip: "选择图片 ZIP",
+    clearImageSources: "清空已选图片来源",
     imageSourceAlternatives: "当前浏览器无法读取文件夹时，可选择保留目录结构的图片 ZIP。仅当图片文件名不重复时，才适合直接多选图片文件。",
     imageSourceGroupLabel: "添加项目图片",
     matched: "已匹配",
@@ -174,6 +190,7 @@ const copy = {
     ambiguous: "重名",
     matching: "正在查找项目图片…",
     imagesIncomplete: "图片尚未全部唯一匹配，暂不能生成完整项目。",
+    imagesIncompleteDimensions: "需要为每个项目图片找到唯一文件，才能读取尺寸并生成 .subvisionproj。",
     showRemaining: (count: number) => `查看其余 ${count} 项`,
     diagnostics: "转换检查",
     showMoreDiagnostics: (count: number) => `查看其余 ${count} 项`,
@@ -182,9 +199,12 @@ const copy = {
     confirmationLabel: "我已了解上述字段不会写入目标格式，并继续转换。",
     sourceUnchanged: "源文件不会被修改。",
     saving: "正在保存…",
+    cancel: "取消",
     retry: "重试保存",
     success: "转换完成",
-    successDetail: "项目文件已保存到你选择的位置。",
+    successDirect: "项目文件已保存到你选择的位置。",
+    successDownload: "浏览器下载已开始，请在下载列表中查看。",
+    successFallback: "项目文件已生成。",
     another: "转换另一个项目",
     unsupported: "当前项目没有可安全生成的目标格式。",
     genericError: "转换未完成，源文件未被修改。",
@@ -253,12 +273,14 @@ const copy = {
     recommended: "Recommended",
     imageHeading: "Project images",
     imageHelp: "A complete project needs every original image. Add more folders if the images are spread across locations.",
+    imageHelpDimensions: "Images are used only to read missing dimensions and are not packaged in the .subvisionproj file.",
     sourceImagesReady: "Images ready",
     sourceImagesReadyDetail: "All images were read from the source project. No folder is needed.",
     selectDirectory: "Choose image folder",
     addDirectory: "Add another folder",
     selectImageFiles: "Choose image files",
     selectImageZip: "Choose image ZIP",
+    clearImageSources: "Clear selected image sources",
     imageSourceAlternatives: "If this browser cannot read folders, choose an image ZIP that preserves the folder structure. Direct file selection is safe only when image filenames are unique.",
     imageSourceGroupLabel: "Add project images",
     matched: "Matched",
@@ -266,6 +288,7 @@ const copy = {
     ambiguous: "Duplicates",
     matching: "Finding project images…",
     imagesIncomplete: "Every image must have one unique match before a complete project can be created.",
+    imagesIncompleteDimensions: "Every project image needs one unique match before its dimensions can be read and the .subvisionproj file created.",
     showRemaining: (count: number) => `Show ${count} more`,
     diagnostics: "Conversion checks",
     showMoreDiagnostics: (count: number) => `Show ${count} more`,
@@ -274,9 +297,12 @@ const copy = {
     confirmationLabel: "I understand that these fields will not be written to the target format and want to continue.",
     sourceUnchanged: "The source file will not be changed.",
     saving: "Saving…",
+    cancel: "Cancel",
     retry: "Try saving again",
     success: "Conversion complete",
-    successDetail: "The project file was saved to the location you chose.",
+    successDirect: "The project file was saved to the location you chose.",
+    successDownload: "The browser download has started. Check your downloads list.",
+    successFallback: "The project file was created.",
     another: "Convert another project",
     unsupported: "This project has no target format that can be created safely.",
     genericError: "Conversion did not finish. The source file was not changed.",
@@ -345,12 +371,14 @@ const copy = {
     recommended: "권장",
     imageHeading: "프로젝트 이미지",
     imageHelp: "전체 프로젝트에는 모든 원본 이미지가 필요합니다. 이미지가 여러 위치에 있으면 폴더를 추가하세요.",
+    imageHelpDimensions: "이미지는 누락된 크기 정보를 읽는 데만 사용되며 .subvisionproj 파일에 포함되지 않습니다.",
     sourceImagesReady: "이미지 준비 완료",
     sourceImagesReadyDetail: "원본 프로젝트에서 모든 이미지를 읽었습니다. 폴더를 다시 선택할 필요가 없습니다.",
     selectDirectory: "이미지 폴더 선택",
     addDirectory: "다른 폴더 추가",
     selectImageFiles: "이미지 파일 선택",
     selectImageZip: "이미지 ZIP 선택",
+    clearImageSources: "선택한 이미지 소스 지우기",
     imageSourceAlternatives: "이 브라우저가 폴더를 읽지 못하면 폴더 구조를 유지한 이미지 ZIP을 선택하세요. 이미지 파일명이 모두 고유한 경우에만 파일을 직접 선택할 수 있습니다.",
     imageSourceGroupLabel: "프로젝트 이미지 추가",
     matched: "일치",
@@ -358,6 +386,7 @@ const copy = {
     ambiguous: "중복",
     matching: "프로젝트 이미지를 찾는 중…",
     imagesIncomplete: "전체 프로젝트를 만들려면 모든 이미지가 하나의 파일과 정확히 일치해야 합니다.",
+    imagesIncompleteDimensions: "이미지 크기를 읽고 .subvisionproj 파일을 만들려면 각 프로젝트 이미지가 하나의 파일과 정확히 일치해야 합니다.",
     showRemaining: (count: number) => `${count}개 더 보기`,
     diagnostics: "변환 검사",
     showMoreDiagnostics: (count: number) => `${count}개 더 보기`,
@@ -366,9 +395,12 @@ const copy = {
     confirmationLabel: "위 필드가 대상 형식에 기록되지 않음을 이해했으며 변환을 계속합니다.",
     sourceUnchanged: "원본 파일은 변경되지 않습니다.",
     saving: "저장 중…",
+    cancel: "취소",
     retry: "저장 다시 시도",
     success: "변환 완료",
-    successDetail: "선택한 위치에 프로젝트 파일을 저장했습니다.",
+    successDirect: "선택한 위치에 프로젝트 파일을 저장했습니다.",
+    successDownload: "브라우저 다운로드를 시작했습니다. 다운로드 목록을 확인하세요.",
+    successFallback: "프로젝트 파일을 만들었습니다.",
     another: "다른 프로젝트 변환",
     unsupported: "이 프로젝트에서 안전하게 만들 수 있는 대상 형식이 없습니다.",
     genericError: "변환이 완료되지 않았습니다. 원본 파일은 변경되지 않았습니다.",
@@ -443,6 +475,7 @@ export function ConverterShell({
   diagnostics = [],
   confirmation = null,
   progress = null,
+  saveResult = null,
   canSave,
   onSelectFile,
   onDrop,
@@ -450,7 +483,9 @@ export function ConverterShell({
   onSelectDirectory,
   onSelectImageFiles,
   onSelectImageZip,
+  onClearImageSources,
   onSave,
+  onCancel,
   onReset,
   onLanguageChange,
   onConfirmationChange,
@@ -458,11 +493,49 @@ export function ConverterShell({
   const text = copy[language];
   const inputId = useId();
   const fileInput = useRef<HTMLInputElement>(null);
+  const sourceHeadingRef = useRef<HTMLParagraphElement>(null);
+  const diagnosticHeadingRef = useRef<HTMLHeadingElement>(null);
+  const successHeadingRef = useRef<HTMLHeadingElement>(null);
+  const lastFocusKeyRef = useRef<string | null>(null);
   const isMatching = progress?.stage === "matching" || imageMatch?.state === "matching";
-  const isBusy = status === "inspecting" || status === "saving" || isMatching;
+  const isChoosingSaveLocation = progress?.stage === "choosing-save-location";
+  const isBusy = status === "inspecting" || status === "saving" || isMatching || isChoosingSaveLocation;
   const selectedOutput = outputs.find((option) => option.selected);
   const saveEnabled =
     (canSave ?? status === "ready") && !isBusy && !selectedOutput?.disabled;
+  const firstBlockingDiagnostic = diagnostics.find((item) => item.severity === "error");
+  const focusKind = status === "success"
+    ? "success"
+    : firstBlockingDiagnostic
+      ? "diagnostic"
+      : source && status !== "inspecting"
+        ? "source"
+        : null;
+  const focusKey = focusKind === "success"
+    ? `success:${saveResult?.fileName ?? "result"}`
+    : focusKind === "diagnostic"
+      ? `diagnostic:${firstBlockingDiagnostic?.code ?? firstBlockingDiagnostic?.message ?? status}`
+      : focusKind === "source"
+        ? `source:${source?.fileName ?? "project"}`
+        : null;
+
+  useEffect(() => {
+    if (!focusKey || !focusKind) {
+      lastFocusKeyRef.current = null;
+      return;
+    }
+    if (lastFocusKeyRef.current === focusKey) return;
+    lastFocusKeyRef.current = focusKey;
+    const frame = window.requestAnimationFrame(() => {
+      const heading = focusKind === "success"
+        ? successHeadingRef.current
+        : focusKind === "diagnostic"
+          ? diagnosticHeadingRef.current
+          : sourceHeadingRef.current;
+      heading?.focus({ preventScroll: false });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusKey, focusKind]);
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     if (event.currentTarget.files?.length) {
@@ -541,6 +614,8 @@ export function ConverterShell({
               text={text}
               language={language}
               onReset={onReset}
+              onCancel={onCancel}
+              diagnosticHeadingRef={diagnosticHeadingRef}
             />
           ) : null}
 
@@ -553,6 +628,7 @@ export function ConverterShell({
                 isBusy={isBusy}
                 showReset={status !== "success"}
                 onReset={onReset}
+                headingRef={sourceHeadingRef}
               />
 
               {outputs.length > 0 ? (
@@ -574,11 +650,16 @@ export function ConverterShell({
                   onSelectDirectory={onSelectDirectory}
                   onSelectImageFiles={onSelectImageFiles}
                   onSelectImageZip={onSelectImageZip}
+                  onClearImageSources={onClearImageSources}
                 />
               ) : null}
 
               {diagnostics.length > 0 ? (
-                <DiagnosticSection diagnostics={diagnostics} text={text} />
+                <DiagnosticSection
+                  diagnostics={diagnostics}
+                  text={text}
+                  headingRef={diagnosticHeadingRef}
+                />
               ) : null}
 
               {confirmation?.required && status !== "success" ? (
@@ -592,7 +673,12 @@ export function ConverterShell({
               ) : null}
 
               {progress ? (
-                <ProgressSection progress={progress} text={text} language={language} />
+                <ProgressSection
+                  progress={progress}
+                  text={text}
+                  language={language}
+                  onCancel={onCancel}
+                />
               ) : null}
 
               {status === "unsupported" && diagnostics.length === 0 ? (
@@ -608,7 +694,12 @@ export function ConverterShell({
               ) : null}
 
               {status === "success" ? (
-                <SuccessSection text={text} onReset={onReset} />
+                <SuccessSection
+                  text={text}
+                  result={saveResult}
+                  onReset={onReset}
+                  headingRef={successHeadingRef}
+                />
               ) : selectedOutput ? (
                 <footer className="converter-card__actions">
                   <button
@@ -617,7 +708,9 @@ export function ConverterShell({
                     disabled={!saveEnabled}
                     onClick={onSave}
                   >
-                    {status === "saving"
+                    {isChoosingSaveLocation
+                      ? text.stages["choosing-save-location"]
+                      : status === "saving"
                       ? text.saving
                       : status === "error" && saveEnabled
                         ? text.retry
@@ -696,6 +789,8 @@ function StatusOnly({
   text,
   language,
   onReset,
+  onCancel,
+  diagnosticHeadingRef,
 }: {
   status: ConverterStatus;
   progress: ConverterProgress | null;
@@ -703,12 +798,18 @@ function StatusOnly({
   text: LocalizedCopy;
   language: ConverterLanguage;
   onReset: () => void;
+  onCancel: () => void;
+  diagnosticHeadingRef: RefObject<HTMLHeadingElement | null>;
 }) {
   if (status === "unsupported") {
     return (
       <div className="converter-status-result">
         {diagnostics.length > 0 ? (
-          <DiagnosticSection diagnostics={diagnostics} text={text} />
+          <DiagnosticSection
+            diagnostics={diagnostics}
+            text={text}
+            headingRef={diagnosticHeadingRef}
+          />
         ) : (
           <div className="converter-inline-message converter-inline-message--error" role="alert">
             {text.unsupported}
@@ -724,7 +825,11 @@ function StatusOnly({
     return (
       <div className="converter-status-result">
         {diagnostics.length > 0 ? (
-          <DiagnosticSection diagnostics={diagnostics} text={text} />
+          <DiagnosticSection
+            diagnostics={diagnostics}
+            text={text}
+            headingRef={diagnosticHeadingRef}
+          />
         ) : (
           <div className="converter-inline-message converter-inline-message--error" role="alert">
             {text.genericError}
@@ -737,11 +842,23 @@ function StatusOnly({
     );
   }
   return progress ? (
-    <ProgressSection progress={progress} text={text} language={language} />
+    <ProgressSection
+      progress={progress}
+      text={text}
+      language={language}
+      onCancel={onCancel}
+    />
   ) : (
     <div className="converter-status-only" role="status" aria-label={text.statusLabel}>
       <span className="converter-spinner" aria-hidden="true" />
       <span>{text.inspecting}</span>
+      <button
+        className="converter-button converter-button--quiet"
+        type="button"
+        onClick={onCancel}
+      >
+        {text.cancel}
+      </button>
     </div>
   );
 }
@@ -753,6 +870,7 @@ function SourceSection({
   isBusy,
   showReset,
   onReset,
+  headingRef,
 }: {
   source: ConverterSourceSummary;
   text: LocalizedCopy;
@@ -760,7 +878,9 @@ function SourceSection({
   isBusy: boolean;
   showReset: boolean;
   onReset: () => void;
+  headingRef: RefObject<HTMLParagraphElement | null>;
 }) {
+  const headingId = useId();
   const stats = [
     source.projectName
       ? { label: text.projectName, value: source.projectName }
@@ -783,11 +903,11 @@ function SourceSection({
   ].filter((item): item is { label: string; value: string } => item !== null);
 
   return (
-    <section className="converter-section converter-source" aria-labelledby="converter-source-heading">
+    <section className="converter-section converter-source" aria-labelledby={headingId}>
       <div className="converter-source__row">
         <div className="converter-source__icon" aria-hidden="true">✓</div>
         <div className="converter-source__identity">
-          <p className="converter-eyebrow" id="converter-source-heading">
+          <p className="converter-eyebrow" id={headingId} ref={headingRef} tabIndex={-1}>
             {text.identified} · {text.formats[source.format]}
           </p>
           <div className="converter-source__filename" title={source.fileName}>
@@ -891,6 +1011,7 @@ function ImageSection({
   onSelectDirectory,
   onSelectImageFiles,
   onSelectImageZip,
+  onClearImageSources,
 }: {
   summary: ImageMatchSummary;
   text: LocalizedCopy;
@@ -899,21 +1020,28 @@ function ImageSection({
   onSelectDirectory: () => void;
   onSelectImageFiles: () => void;
   onSelectImageZip: () => void;
+  onClearImageSources: () => void;
 }) {
+  const headingId = useId();
   const isSourceReady = summary.state === "source-ready";
   const isMatching = summary.state === "matching";
+  const dimensionsOnly = summary.purpose === "dimensions";
   const issueCount = summary.issues?.length ?? 0;
   const visibleIssues = summary.issues?.slice(0, MAX_VISIBLE_ITEMS) ?? [];
   const remainingIssues = summary.issues?.slice(MAX_VISIBLE_ITEMS) ?? [];
   const percent = safePercent(summary.matchedCount, summary.totalCount);
 
   return (
-    <section className="converter-section converter-images" aria-labelledby="converter-images-heading">
+    <section className="converter-section converter-images" aria-labelledby={headingId}>
       <div className="converter-section__heading-row">
         <div>
-          <h2 id="converter-images-heading">{text.imageHeading}</h2>
+          <h2 id={headingId}>{text.imageHeading}</h2>
           <p>
-            {isSourceReady ? text.sourceImagesReadyDetail : text.imageHelp}
+            {dimensionsOnly
+              ? text.imageHelpDimensions
+              : isSourceReady
+                ? text.sourceImagesReadyDetail
+                : text.imageHelp}
           </p>
         </div>
         {isSourceReady ? (
@@ -953,6 +1081,16 @@ function ImageSection({
                 {text.selectImageFiles}
               </button>
             </div>
+            {summary.hasSelectedSources ? (
+              <button
+                className="converter-button converter-button--quiet converter-image-actions__clear"
+                type="button"
+                disabled={disabled || isMatching}
+                onClick={onClearImageSources}
+              >
+                {text.clearImageSources}
+              </button>
+            ) : null}
             <small>{text.imageSourceAlternatives}</small>
           </div>
         ) : null}
@@ -983,7 +1121,7 @@ function ImageSection({
             </p>
           ) : summary.state === "incomplete" || summary.state === "needs-directory" ? (
             <p className="converter-images__notice converter-images__notice--warning">
-              {text.imagesIncomplete}
+              {dimensionsOnly ? text.imagesIncompleteDimensions : text.imagesIncomplete}
             </p>
           ) : null}
         </>
@@ -1033,10 +1171,13 @@ function IssueRow({
 function DiagnosticSection({
   diagnostics,
   text,
+  headingRef,
 }: {
   diagnostics: readonly ConverterDiagnostic[];
   text: LocalizedCopy;
+  headingRef?: RefObject<HTMLHeadingElement | null>;
 }) {
+  const headingId = useId();
   const visible = diagnostics.slice(0, MAX_VISIBLE_ITEMS);
   const remaining = diagnostics.slice(MAX_VISIBLE_ITEMS);
   const hasError = diagnostics.some((diagnostic) => diagnostic.severity === "error");
@@ -1044,11 +1185,13 @@ function DiagnosticSection({
   return (
     <section
       className="converter-section converter-diagnostics"
-      aria-labelledby="converter-diagnostics-heading"
+      aria-labelledby={headingId}
       role={hasError ? "alert" : undefined}
       aria-live={hasError ? "assertive" : "polite"}
     >
-      <h2 id="converter-diagnostics-heading">{text.diagnostics}</h2>
+      <h2 id={headingId} ref={headingRef} tabIndex={headingRef ? -1 : undefined}>
+        {text.diagnostics}
+      </h2>
       <ul>
         {visible.map((diagnostic, index) => (
           <DiagnosticRow diagnostic={diagnostic} key={`${diagnostic.code ?? "diagnostic"}-${index}`} />
@@ -1127,10 +1270,12 @@ function ProgressSection({
   progress,
   text,
   language,
+  onCancel,
 }: {
   progress: ConverterProgress;
   text: LocalizedCopy;
   language: ConverterLanguage;
+  onCancel: () => void;
 }) {
   const hasDeterminateProgress =
     progress.percent !== undefined ||
@@ -1149,7 +1294,16 @@ function ProgressSection({
           <strong>{progress.label ?? text.stages[progress.stage]}</strong>
           {progress.detail ? <p>{progress.detail}</p> : null}
         </div>
-        {valueText ? <span>{valueText}</span> : null}
+        <div className="converter-work__actions">
+          {valueText ? <span>{valueText}</span> : null}
+          <button
+            className="converter-button converter-button--quiet converter-work__cancel"
+            type="button"
+            onClick={onCancel}
+          >
+            {text.cancel}
+          </button>
+        </div>
       </div>
       {hasDeterminateProgress ? (
         <progress className="converter-progress" value={value} max={100} aria-label={text.progressLabel} />
@@ -1160,13 +1314,33 @@ function ProgressSection({
   );
 }
 
-function SuccessSection({ text, onReset }: { text: LocalizedCopy; onReset: () => void }) {
+function SuccessSection({
+  text,
+  result,
+  onReset,
+  headingRef,
+}: {
+  text: LocalizedCopy;
+  result: ConverterSaveResult | null;
+  onReset: () => void;
+  headingRef: RefObject<HTMLHeadingElement | null>;
+}) {
+  const detail = result
+    ? result.mode === "direct"
+      ? text.successDirect
+      : text.successDownload
+    : text.successFallback;
   return (
     <section className="converter-success" role="status">
       <div className="converter-success__mark" aria-hidden="true">✓</div>
       <div>
-        <h2>{text.success}</h2>
-        <p>{text.successDetail}</p>
+        <h2 ref={headingRef} tabIndex={-1}>{text.success}</h2>
+        <p>{detail}</p>
+        {result?.fileName ? (
+          <code className="converter-success__filename" title={result.fileName}>
+            {result.fileName}
+          </code>
+        ) : null}
       </div>
       <button
         className="converter-button converter-button--primary"

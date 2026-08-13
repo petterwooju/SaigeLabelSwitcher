@@ -72,3 +72,61 @@ test("readBlob preserves entry bytes", async () => {
   );
   await archive.close();
 });
+
+test("archive limits entry count, materialization, names, and prefix reads", async () => {
+  const source = await makeZip([
+    ["data/first.txt", "abcdef"],
+    ["data/second.txt", "ghijkl"],
+  ]);
+  await assert.rejects(
+    openValidatedZip(source, { maxEntries: 1 }),
+    (error: unknown) =>
+      error instanceof ArchiveValidationError && error.code === "ZIP_TOO_MANY_ENTRIES",
+  );
+  await assert.rejects(
+    openValidatedZip(source, { maxEntryNameBytes: 4 }),
+    (error: unknown) =>
+      error instanceof ArchiveValidationError && error.code === "ZIP_ENTRY_NAME_TOO_LONG",
+  );
+
+  const archive = await openValidatedZip(source);
+  try {
+    await assert.rejects(
+      archive.readBlob("data/first.txt", "text/plain", 5),
+      (error: unknown) =>
+        error instanceof ArchiveValidationError && error.code === "ZIP_BLOB_TOO_LARGE",
+    );
+    assert.deepEqual(
+      Array.from(await archive.readPrefix("data/first.txt", 3)),
+      Array.from(new TextEncoder().encode("abc")),
+    );
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(archive.readPrefix("data/first.txt", 3, controller.signal), {
+      name: "AbortError",
+    });
+  } finally {
+    await archive.close();
+  }
+});
+
+test("archive text rejects invalid UTF-8", async () => {
+  const sink = new BlobWriter("application/zip");
+  const writer = new ZipWriter(sink, { useWebWorkers: false });
+  await writer.add(
+    "bad.txt",
+    new BlobReader(new Blob([new Uint8Array([0xc3, 0x28])])),
+  );
+  await writer.close();
+  const archive = await openValidatedZip(await sink.getData());
+  try {
+    await assert.rejects(
+      archive.readText("bad.txt"),
+      (error: unknown) =>
+        error instanceof ArchiveValidationError &&
+        error.code === "ZIP_TEXT_INVALID_UTF8",
+    );
+  } finally {
+    await archive.close();
+  }
+});

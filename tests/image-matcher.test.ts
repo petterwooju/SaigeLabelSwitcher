@@ -13,6 +13,7 @@ import {
   matchImageFiles,
   matchProjectFiles,
   mergeArchiveImageEntries,
+  mergePickedDirectoryFiles,
   mergeSelectedFiles,
 } from "../lib/files/imageMatcher.ts";
 import { openValidatedZip } from "../lib/archive/zip.ts";
@@ -157,6 +158,41 @@ test("deduplicates an identical browser selection and ignores OS metadata", () =
   ]);
   assert.equal(files.length, 1);
   assert.equal(files[0]?.relativePath, "root/图片.png");
+});
+
+test("keeps metadata-identical files from separate picker selections", () => {
+  const firstFile = selectedFile("images/color/000.png", 9);
+  const secondFile = selectedFile("images/color/000.png", 9);
+  const firstSelection = mergePickedDirectoryFiles([], [
+    { file: firstFile, relativePath: "images/color/000.png" },
+  ]);
+  const merged = mergePickedDirectoryFiles(firstSelection, [
+    { file: secondFile, relativePath: "images/color/000.png" },
+  ]);
+
+  assert.equal(merged.length, 2);
+  assert.notEqual(merged[0]?.id, merged[1]?.id);
+  assert.notEqual(merged[0]?.selectionId, merged[1]?.selectionId);
+
+  const report = matchImageFiles(
+    ["C:\\project\\images\\color\\000.png"],
+    merged,
+  );
+  assert.equal(report.matchedCount, 0);
+  assert.equal(report.ambiguousCount, 1);
+  assert.equal(report.matches[0]?.candidates.length, 2);
+  assert.equal(report.canPackage, false);
+});
+
+test("deduplicates the same File object only within one picker selection", () => {
+  const image = selectedFile("images/color/000.png", 9);
+  const picked = { file: image, relativePath: "images/color/000.png" };
+  const firstSelection = mergePickedDirectoryFiles([], [picked, picked]);
+  const merged = mergePickedDirectoryFiles(firstSelection, [picked]);
+
+  assert.equal(firstSelection.length, 1);
+  assert.equal(merged.length, 2);
+  assert.notEqual(merged[0]?.selectionId, merged[1]?.selectionId);
 });
 
 test("reads File System Access directories recursively", async () => {

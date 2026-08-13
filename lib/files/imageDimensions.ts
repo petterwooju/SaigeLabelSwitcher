@@ -28,6 +28,8 @@ export type ImageDimensionIssueCode =
   | "IMAGE_HEADER_INVALID"
   | "IMAGE_DIMENSIONS_INVALID"
   | "IMAGE_DIMENSIONS_TOO_LARGE"
+  | "IMAGE_DIMENSIONS_MISMATCH"
+  | "IMAGE_FORMAT_MISMATCH"
   | "IMAGE_BITMAP_DECODE_FAILED";
 
 export interface ImageDimensionIssue {
@@ -47,7 +49,7 @@ export interface ImageDimensionProgress {
   readonly total: number;
   readonly fileIndex: number;
   readonly path: string;
-  readonly status: "enriched" | "failed";
+  readonly status: "enriched" | "verified" | "failed";
   readonly width?: number;
   readonly height?: number;
   readonly format?: ImageDimensionFormat;
@@ -64,6 +66,11 @@ export interface ImageDimensionEnrichmentResult {
 }
 
 type ProgressHandler = (progress: ImageDimensionProgress) => void;
+
+export interface ImageVerificationOptions {
+  readonly signal?: AbortSignal;
+  readonly onProgress?: ProgressHandler;
+}
 
 interface Dimensions {
   readonly width: number;
@@ -183,6 +190,100 @@ export async function enrichProjectImageDimensions(
   };
 }
 
+/**
+ * Verify every resolved image that will be packaged, not only files with
+ * missing dimensions. Existing dimensions must match the detected header;
+ * missing dimensions are enriched immutably.
+ */
+export async function verifyAndEnrichProjectImages(
+  project: ProjectIR,
+  resolvedImages: readonly ResolvedProjectImage[],
+  options: ImageVerificationOptions = {},
+): Promise<ImageDimensionEnrichmentResult> {
+  const targets = [...project.files].sort((left, right) => left.index - right.index);
+  const targetIndexes = new Set(targets.map((file) => file.index));
+  const sources = indexResolvedSources(resolvedImages, targetIndexes);
+  const issues: ImageDimensionIssue[] = [];
+  const updated = new Map<number, ProjectFileIR>();
+  const updatedFileIndexes: number[] = [];
+  let completed = 0;
+
+  for (const file of targets) {
+    throwIfAborted(options.signal);
+    const resolved = sources.get(file.index);
+    let issue: ImageDimensionIssue | undefined;
+    let detected: Dimensions | undefined;
+
+    if (resolved === "duplicate") {
+      issue = createIssue(
+        file,
+        "IMAGE_SOURCE_DUPLICATE",
+        "More than one resolved image source uses this file index.",
+      );
+    } else if (!resolved) {
+      issue = createIssue(
+        file,
+        "IMAGE_SOURCE_MISSING",
+        "No resolved image source is available for verification.",
+      );
+    } else {
+      const probe = await probeSourceDimensions(file, resolved.source, options.signal);
+      if ("issue" in probe) issue = probe.issue;
+      else detected = probe.dimensions;
+      if (detected) {
+        issue =
+          validateDetectedDimensions(file, detected) ??
+          validateDetectedFormat(file, resolved.source, detected) ??
+          validateDeclaredDimensions(file, detected);
+      }
+    }
+
+    if (detected && !issue && !isValidDimensionPair(file.width, file.height)) {
+      updated.set(file.index, {
+        ...file,
+        width: detected.width,
+        height: detected.height,
+      });
+      updatedFileIndexes.push(file.index);
+    }
+
+    completed += 1;
+    if (issue) {
+      issues.push(issue);
+      options.onProgress?.({
+        completed,
+        total: targets.length,
+        fileIndex: file.index,
+        path: file.sourcePath,
+        status: "failed",
+        ...(issue.format ? { format: issue.format } : {}),
+        issueCode: issue.code,
+      });
+    } else if (detected) {
+      options.onProgress?.({
+        completed,
+        total: targets.length,
+        fileIndex: file.index,
+        path: file.sourcePath,
+        status: isValidDimensionPair(file.width, file.height) ? "verified" : "enriched",
+        width: detected.width,
+        height: detected.height,
+        format: detected.format,
+      });
+    }
+  }
+
+  const files = project.files.map((file) => updated.get(file.index) ?? file);
+  return {
+    project: { ...project, files },
+    issues,
+    updatedFileIndexes,
+    complete:
+      issues.length === 0 &&
+      files.every((file) => isValidDimensionPair(file.width, file.height)),
+  };
+}
+
 function indexResolvedSources(
   images: readonly ResolvedProjectImage[],
   targetIndexes: ReadonlySet<number>,
@@ -201,14 +302,16 @@ function indexResolvedSources(
 async function probeSourceDimensions(
   file: ProjectFileIR,
   source: BinarySource,
+  signal?: AbortSignal,
 ): Promise<
   | { readonly dimensions: Dimensions }
   | { readonly issue: ImageDimensionIssue }
 > {
   let header: Uint8Array;
   try {
-    header = await readHeaderBytes(source);
+    header = await readHeaderBytes(source, signal);
   } catch (error) {
+    if (isAbortError(error)) throw error;
     return {
       issue: createIssue(
         file,
@@ -247,8 +350,14 @@ async function probeSourceDimensions(
     blob =
       source.kind === "blob"
         ? source.blob
-        : await source.archive.readBlob(source.entryName);
+        : await source.archive.readBlob(
+            source.entryName,
+            "application/octet-stream",
+            undefined,
+            signal,
+          );
   } catch (error) {
+    if (isAbortError(error)) throw error;
     return {
       issue: createIssue(
         file,
@@ -284,35 +393,18 @@ async function probeSourceDimensions(
   }
 }
 
-async function readHeaderBytes(source: BinarySource): Promise<Uint8Array> {
+async function readHeaderBytes(
+  source: BinarySource,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  throwIfAborted(signal);
   if (source.kind === "blob") {
     return new Uint8Array(
       await source.blob.slice(0, MAX_IMAGE_HEADER_BYTES).arrayBuffer(),
     );
   }
 
-  const chunks: Uint8Array[] = [];
-  let captured = 0;
-  const writable = new WritableStream<Uint8Array>({
-    write(chunk) {
-      const remaining = MAX_IMAGE_HEADER_BYTES - captured;
-      if (remaining <= 0) return;
-      const length = Math.min(remaining, chunk.byteLength);
-      const copy = new Uint8Array(length);
-      copy.set(chunk.subarray(0, length));
-      chunks.push(copy);
-      captured += length;
-    },
-  });
-  await source.archive.pipeTo(source.entryName, writable);
-
-  const result = new Uint8Array(captured);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return result;
+  return source.archive.readPrefix(source.entryName, MAX_IMAGE_HEADER_BYTES, signal);
 }
 
 function parseImageHeader(bytes: Uint8Array): HeaderProbe {
@@ -507,6 +599,77 @@ function validateDetectedDimensions(
   return undefined;
 }
 
+function validateDeclaredDimensions(
+  file: ProjectFileIR,
+  detected: Dimensions,
+): ImageDimensionIssue | undefined {
+  if (
+    isValidDimensionPair(file.width, file.height) &&
+    (file.width !== detected.width || file.height !== detected.height)
+  ) {
+    return createIssue(
+      file,
+      "IMAGE_DIMENSIONS_MISMATCH",
+      `Project dimensions ${file.width} × ${file.height} do not match the image header ${detected.width} × ${detected.height}.`,
+      detected.format,
+      detected.width,
+      detected.height,
+    );
+  }
+  return undefined;
+}
+
+function validateDetectedFormat(
+  file: ProjectFileIR,
+  source: BinarySource,
+  detected: Dimensions,
+): ImageDimensionIssue | undefined {
+  if (detected.format === "browser") return undefined;
+  const extensionFormat = formatFromExtension(file.fileName || file.sourcePath);
+  let mimeFormat: ImageDimensionFormat | undefined;
+  if (source.kind === "blob") {
+    mimeFormat = formatFromMime(source.blob.type);
+  }
+  if (
+    (extensionFormat !== undefined && extensionFormat !== detected.format) ||
+    (mimeFormat !== undefined && mimeFormat !== detected.format)
+  ) {
+    return createIssue(
+      file,
+      "IMAGE_FORMAT_MISMATCH",
+      `Image header format '${detected.format}' does not match the selected file name or MIME type.`,
+      detected.format,
+      detected.width,
+      detected.height,
+    );
+  }
+  return undefined;
+}
+
+function formatFromExtension(value: string): ImageDimensionFormat | undefined {
+  const extension = /\.([^.\\/]+)$/u.exec(value)?.[1]?.toLocaleLowerCase("en-US");
+  switch (extension) {
+    case "png": return "png";
+    case "jpg":
+    case "jpeg": return "jpeg";
+    case "bmp": return "bmp";
+    case "gif": return "gif";
+    case "webp": return "webp";
+    default: return undefined;
+  }
+}
+
+function formatFromMime(value: string): ImageDimensionFormat | undefined {
+  switch (value.trim().toLocaleLowerCase("en-US")) {
+    case "image/png": return "png";
+    case "image/jpeg": return "jpeg";
+    case "image/bmp": return "bmp";
+    case "image/gif": return "gif";
+    case "image/webp": return "webp";
+    default: return undefined;
+  }
+}
+
 function isValidDimensionPair(
   width: number | undefined,
   height: number | undefined,
@@ -622,4 +785,17 @@ function readUint24LE(bytes: Uint8Array, offset: number): number {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+}
+
+function isAbortError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "name" in error &&
+      (error as { name?: unknown }).name === "AbortError",
+  );
 }
