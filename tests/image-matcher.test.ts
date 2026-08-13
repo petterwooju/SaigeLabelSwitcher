@@ -12,8 +12,11 @@ import {
   createProjectImageReferences,
   matchImageFiles,
   matchProjectFiles,
+  mergeArchiveImageEntries,
   mergeSelectedFiles,
 } from "../lib/files/imageMatcher.ts";
+import { openValidatedZip } from "../lib/archive/zip.ts";
+import { BlobWriter, TextReader, ZipWriter } from "@zip.js/zip.js";
 import {
   isSafeZipEntryPath,
   normalizePath,
@@ -66,6 +69,48 @@ test("reports a same-name tie as ambiguous", () => {
   assert.equal(report.ambiguousCount, 1);
   assert.equal(report.matches[0]?.candidates.length, 2);
   assert.equal(report.canPackage, false);
+});
+
+test("never reuses one bare selected file for distinct project paths", () => {
+  const files = mergeSelectedFiles([], [selectedFile("000.png", 7)]);
+  const report = matchImageFiles(
+    ["C:\\images\\color\\000.png", "C:\\images\\crack\\000.png"],
+    files,
+  );
+
+  assert.equal(report.matchedCount, 0);
+  assert.equal(report.ambiguousCount, 2);
+  assert.equal(report.canPackage, false);
+});
+
+test("keeps validated image ZIP entries lazy while matching their paths", async () => {
+  const output = new BlobWriter("application/zip");
+  const writer = new ZipWriter(output);
+  await writer.add("images/color/000.png", new TextReader("color"), { level: 0 });
+  await writer.add("images/crack/000.png", new TextReader("crack"), { level: 0 });
+  await writer.close();
+  const archive = await openValidatedZip(await output.getData());
+  try {
+    const files = mergeArchiveImageEntries(
+      [],
+      archive,
+      archive.entries.map((entry) => ({
+        entryName: entry.name,
+        size: entry.uncompressedSize,
+      })),
+      "fixture.zip::1",
+    );
+    const report = matchImageFiles(
+      ["C:\\images\\color\\000.png", "C:\\images\\crack\\000.png"],
+      files,
+    );
+    assert.equal(report.matchedCount, 2);
+    assert.equal(report.ambiguousCount, 0);
+    assert.equal(report.canPackage, true);
+    assert.equal(report.uniqueMatchedFiles[0]?.source.kind, "archive");
+  } finally {
+    await archive.close();
+  }
 });
 
 test("reports missing and blank project paths without silently dropping them", () => {

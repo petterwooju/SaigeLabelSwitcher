@@ -1,4 +1,6 @@
 import type { PickedDirectoryFile } from "./directoryPicker.ts";
+import type { OpenArchive } from "../archive/zip.ts";
+import type { BinarySource } from "../output/containers.ts";
 import {
   comparisonPathSegments,
   lastPathSegment,
@@ -16,7 +18,9 @@ export interface ProjectImageReference {
 
 export interface SelectedSourceFile {
   id: string;
-  file: File;
+  /** Present for directly selected browser files. Archive entries stay lazy. */
+  file?: File;
+  source: BinarySource;
   relativePath: string;
   normalizedRelativePath: string;
   pathSegments: string[];
@@ -25,6 +29,12 @@ export interface SelectedSourceFile {
 export interface SourceFileInput {
   file: File;
   relativePath: string;
+}
+
+export interface ArchiveSourceInput {
+  readonly entryName: string;
+  readonly relativePath?: string;
+  readonly size: number;
 }
 
 export type ImageMatchStatus = "matched" | "missing" | "ambiguous" | "blank";
@@ -112,6 +122,43 @@ export function mergePickedDirectoryFiles(
   return mergeSelectedFileInputs(current, files);
 }
 
+/** Add validated ZIP entries without inflating image bytes into memory. */
+export function mergeArchiveImageEntries(
+  current: readonly SelectedSourceFile[],
+  archive: OpenArchive,
+  entries: Iterable<ArchiveSourceInput>,
+  selectionId: string,
+): SelectedSourceFile[] {
+  const merged = new Map(current.map((item) => [item.id, item]));
+  for (const entry of entries) {
+    const normalizedRelativePath = normalizePath(
+      entry.relativePath || entry.entryName,
+    );
+    const fileName = lastPathSegment(normalizedRelativePath);
+    if (!fileName || shouldIgnoreSelectedFile(fileName)) continue;
+    const id = [
+      "archive",
+      selectionId,
+      pathComparisonKey(normalizedRelativePath),
+      entry.size,
+    ].join("::");
+    merged.set(id, {
+      id,
+      source: {
+        kind: "archive",
+        archive,
+        entryName: entry.entryName,
+        size: entry.size,
+        relativePath: normalizedRelativePath,
+      },
+      relativePath: normalizedRelativePath,
+      normalizedRelativePath,
+      pathSegments: comparisonPathSegments(normalizedRelativePath),
+    });
+  }
+  return sortSelectedFiles(merged.values());
+}
+
 export function mergeSelectedFileInputs(
   current: readonly SelectedSourceFile[],
   inputs: Iterable<SourceFileInput>,
@@ -132,13 +179,20 @@ export function mergeSelectedFileInputs(
     merged.set(id, {
       id,
       file,
+      source: { kind: "blob", blob: file, relativePath },
       relativePath,
       normalizedRelativePath,
       pathSegments: comparisonPathSegments(normalizedRelativePath),
     });
   }
 
-  return Array.from(merged.values()).sort((left, right) => {
+  return sortSelectedFiles(merged.values());
+}
+
+function sortSelectedFiles(
+  files: Iterable<SelectedSourceFile>,
+): SelectedSourceFile[] {
+  return Array.from(files).sort((left, right) => {
     const keyOrder = pathComparisonKey(left.relativePath).localeCompare(
       pathComparisonKey(right.relativePath),
       "en-US",
@@ -169,7 +223,7 @@ export function matchImageFiles(
     byFileName.set(fileNameKey, bucket);
   }
 
-  const matches = referenceSet.references.map<ImagePathMatch>((projectPath) => {
+  const initialMatches = referenceSet.references.map<ImagePathMatch>((projectPath) => {
     if (!projectPath.normalizedPath || !projectPath.fileName) {
       return { projectPath, status: "blank", candidates: [], score: 0 };
     }
@@ -206,6 +260,34 @@ export function matchImageFiles(
     };
   });
 
+  // A bare file selection has no parent directory information. Never allow one
+  // selected binary to satisfy multiple distinct project paths silently.
+  const assignments = new Map<string, ImagePathMatch[]>();
+  for (const match of initialMatches) {
+    if (match.status !== "matched" || !match.selectedFile) continue;
+    const bucket = assignments.get(match.selectedFile.id) ?? [];
+    bucket.push(match);
+    assignments.set(match.selectedFile.id, bucket);
+  }
+  const conflictingIds = new Set<string>();
+  for (const [selectedId, bucket] of assignments) {
+    const distinctPaths = new Set(
+      bucket.map((match) => pathComparisonKey(match.projectPath.normalizedPath)),
+    );
+    if (distinctPaths.size > 1) conflictingIds.add(selectedId);
+  }
+  const matches = initialMatches.map((match): ImagePathMatch => {
+    if (!match.selectedFile || !conflictingIds.has(match.selectedFile.id)) {
+      return match;
+    }
+    return {
+      projectPath: match.projectPath,
+      status: "ambiguous",
+      candidates: [match.selectedFile],
+      score: match.score,
+    };
+  });
+
   const matched = matches.filter(
     (match): match is ImagePathMatch & { selectedFile: SelectedSourceFile } =>
       match.status === "matched" && match.selectedFile !== undefined,
@@ -233,7 +315,10 @@ export function matchImageFiles(
     ambiguousCount,
     blankPathCount,
     uniqueMatchedFiles,
-    matchedBytes: uniqueMatchedFiles.reduce((sum, item) => sum + item.file.size, 0),
+    matchedBytes: uniqueMatchedFiles.reduce(
+      (sum, item) => sum + binarySourceSize(item.source),
+      0,
+    ),
     canPackage:
       totalCount > 0 &&
       matchedCount === totalCount &&
@@ -241,6 +326,10 @@ export function matchImageFiles(
       ambiguousCount === 0 &&
       blankPathCount === 0,
   };
+}
+
+function binarySourceSize(source: BinarySource): number {
+  return source.kind === "blob" ? source.blob.size : source.size;
 }
 
 /** Compatibility entry point for the former `{ paths, summary }` parser API. */

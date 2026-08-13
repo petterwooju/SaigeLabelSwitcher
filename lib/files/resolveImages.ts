@@ -87,11 +87,7 @@ export function resolveProjectImages(
         });
         continue;
       }
-      source = {
-        kind: "blob",
-        blob: match.selectedFile.file,
-        relativePath: match.selectedFile.relativePath,
-      };
+      source = match.selectedFile.source;
     }
 
     const bytes = source.kind === "blob" ? source.blob.size : source.size;

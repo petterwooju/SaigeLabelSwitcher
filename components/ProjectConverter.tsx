@@ -21,6 +21,10 @@ import {
   type ImageMatchSummary,
 } from "./ConverterShell";
 import {
+  openValidatedZip,
+  type OpenArchive,
+} from "../lib/archive/zip.ts";
+import {
   pickDirectoryFiles,
   readWebkitDirectoryFiles,
   supportsFileSystemDirectoryPicker,
@@ -30,6 +34,7 @@ import {
 import {
   createProjectImageReferences,
   matchImageFiles,
+  mergeArchiveImageEntries,
   mergePickedDirectoryFiles,
   type ImageMatchReport,
   type SelectedSourceFile,
@@ -88,7 +93,12 @@ const uiCopy = {
     segmentation: "分割 (Segmentation)",
     unknownType: "未知类型",
     selectImages: "完整项目需要先选择原图片目录。",
-    directoryUnsupported: "当前浏览器不能选择文件夹，请使用桌面版 Edge 或 Chrome。",
+    directoryUnsupported: "当前浏览器不能选择文件夹，请使用桌面版 Edge 或 Chrome，或改用图片 ZIP。",
+    directoryEmpty: "当前浏览器没有向页面提供所选目录中的文件。请改用图片 ZIP；也可在桌面版 Edge 或 Chrome 中选择目录。",
+    imageFilesNeedPaths: "该项目含有同名图片，直接多选文件会丢失所属目录，无法安全匹配。请改用图片 ZIP，或在桌面版 Edge/Chrome 中选择目录。",
+    imageZipEmpty: "所选 ZIP 中没有找到受支持的图片。请保留类别文件夹结构后重新压缩。",
+    trainingSettingsNotMapped: "V1 的训练参数和数据增强设置不会写入 V2；图片、类别、标注及训练/验证划分不受影响。导入后请在 V2 中重新确认训练设置。",
+    unmappedSourceField: "这个 V1 设置没有经过验证的 V2 对应字段，转换时不会写入目标项目。",
     dimensions: "正在读取图片尺寸…",
     imageFailure: "部分图片无法读取或不是受支持的图片格式。",
     saveFailed: "转换未完成，源文件未被修改。",
@@ -109,7 +119,12 @@ const uiCopy = {
     segmentation: "Segmentation",
     unknownType: "Unknown type",
     selectImages: "Choose the original image folder before creating a complete project.",
-    directoryUnsupported: "This browser cannot choose folders. Use desktop Edge or Chrome.",
+    directoryUnsupported: "This browser cannot choose folders. Use desktop Edge or Chrome, or choose an image ZIP.",
+    directoryEmpty: "This browser did not provide any files from the selected folder. Choose an image ZIP instead, or select the folder in desktop Edge or Chrome.",
+    imageFilesNeedPaths: "This project contains duplicate image filenames. Direct file selection loses their folders and cannot be matched safely. Choose an image ZIP, or select the folder in desktop Edge/Chrome.",
+    imageZipEmpty: "No supported images were found in the selected ZIP. Preserve the class folder structure and create the ZIP again.",
+    trainingSettingsNotMapped: "V1 training and augmentation settings will not be written to V2. Images, classes, labels, and the training/validation split are unaffected. Review the training settings in V2 after import.",
+    unmappedSourceField: "This V1 setting has no verified V2 equivalent and will not be written to the target project.",
     dimensions: "Reading image dimensions…",
     imageFailure: "Some files could not be read as supported images.",
     saveFailed: "Conversion did not finish. The source file was not changed.",
@@ -130,7 +145,12 @@ const uiCopy = {
     segmentation: "분할 (Segmentation)",
     unknownType: "알 수 없는 유형",
     selectImages: "완전한 프로젝트를 만들기 전에 원본 이미지 폴더를 선택하세요.",
-    directoryUnsupported: "이 브라우저는 폴더 선택을 지원하지 않습니다. 데스크톱 Edge 또는 Chrome을 사용하세요.",
+    directoryUnsupported: "이 브라우저는 폴더 선택을 지원하지 않습니다. 데스크톱 Edge 또는 Chrome을 사용하거나 이미지 ZIP을 선택하세요.",
+    directoryEmpty: "이 브라우저가 선택한 폴더의 파일을 페이지에 전달하지 않았습니다. 이미지 ZIP을 선택하거나 데스크톱 Edge/Chrome에서 폴더를 선택하세요.",
+    imageFilesNeedPaths: "이 프로젝트에는 이름이 같은 이미지가 있습니다. 파일 직접 선택은 폴더 정보를 잃어 안전하게 일치시킬 수 없습니다. 이미지 ZIP을 선택하거나 데스크톱 Edge/Chrome에서 폴더를 선택하세요.",
+    imageZipEmpty: "선택한 ZIP에서 지원되는 이미지를 찾지 못했습니다. 클래스 폴더 구조를 유지하여 다시 압축하세요.",
+    trainingSettingsNotMapped: "V1 학습 및 데이터 증강 설정은 V2에 기록되지 않습니다. 이미지, 클래스, 라벨, 학습/검증 분할에는 영향이 없습니다. 가져온 뒤 V2에서 학습 설정을 다시 확인하세요.",
+    unmappedSourceField: "이 V1 설정에는 검증된 V2 대응 필드가 없어 대상 프로젝트에 기록되지 않습니다.",
     dimensions: "이미지 크기를 읽는 중…",
     imageFailure: "일부 파일을 지원되는 이미지로 읽을 수 없습니다.",
     saveFailed: "변환이 완료되지 않았으며 원본 파일은 변경되지 않았습니다.",
@@ -158,11 +178,23 @@ export function ProjectConverter() {
   const [directoryCount, setDirectoryCount] = useState(0);
   const [directoryMatching, setDirectoryMatching] = useState(false);
   const fallbackDirectoryInput = useRef<HTMLInputElement>(null);
+  const imageFilesInput = useRef<HTMLInputElement>(null);
+  const imageZipInput = useRef<HTMLInputElement>(null);
   const loadedRef = useRef<LoadedProject | null>(null);
+  const selectedImageArchivesRef = useRef<Map<string, OpenArchive>>(new Map());
+  const imageZipSequenceRef = useRef(0);
   const mountedRef = useRef(false);
   const generationRef = useRef(0);
   const directoryMatchingRef = useRef(false);
   const fallbackDirectoryContextRef = useRef<{
+    readonly generation: number;
+    readonly loaded: LoadedProject;
+  } | null>(null);
+  const imageFilesContextRef = useRef<{
+    readonly generation: number;
+    readonly loaded: LoadedProject;
+  } | null>(null);
+  const imageZipContextRef = useRef<{
     readonly generation: number;
     readonly loaded: LoadedProject;
   } | null>(null);
@@ -174,6 +206,11 @@ export function ProjectConverter() {
       generationRef.current += 1;
       directoryMatchingRef.current = false;
       fallbackDirectoryContextRef.current = null;
+      imageFilesContextRef.current = null;
+      imageZipContextRef.current = null;
+      const imageArchives = selectedImageArchivesRef.current;
+      selectedImageArchivesRef.current = new Map();
+      void closeOpenArchives(imageArchives.values());
       const current = loadedRef.current;
       loadedRef.current = null;
       void current?.close().catch(() => undefined);
@@ -257,6 +294,11 @@ export function ProjectConverter() {
     generationRef.current += 1;
     directoryMatchingRef.current = false;
     fallbackDirectoryContextRef.current = null;
+    imageFilesContextRef.current = null;
+    imageZipContextRef.current = null;
+    const imageArchives = selectedImageArchivesRef.current;
+    selectedImageArchivesRef.current = new Map();
+    void closeOpenArchives(imageArchives.values());
     const previous = loadedRef.current;
     loadedRef.current = null;
     void previous?.close().catch(() => undefined);
@@ -286,6 +328,11 @@ export function ProjectConverter() {
       generationRef.current = generation;
       directoryMatchingRef.current = false;
       fallbackDirectoryContextRef.current = null;
+      imageFilesContextRef.current = null;
+      imageZipContextRef.current = null;
+      const imageArchives = selectedImageArchivesRef.current;
+      selectedImageArchivesRef.current = new Map();
+      await closeOpenArchives(imageArchives.values());
       const previous = loadedRef.current;
       loadedRef.current = null;
       await previous?.close().catch(() => undefined);
@@ -399,9 +446,20 @@ export function ProjectConverter() {
         generationRef.current !== generation ||
         loadedRef.current !== currentLoaded
       ) return;
+      if (picked.length === 0) {
+        setRuntimeDiagnostics((current) => replaceImageSourceDiagnostic(
+          current,
+          {
+            severity: "error",
+            code: "DIRECTORY_EMPTY_FILE_LIST",
+            message: uiCopy[language].directoryEmpty,
+          },
+        ));
+        return;
+      }
       setSelectedFiles((current) => mergePickedDirectoryFiles(current, picked));
       setDirectoryCount((count) => count + 1);
-      setRuntimeDiagnostics((current) => current.filter((item) => item.code !== "DIRECTORY_UNSUPPORTED"));
+      setRuntimeDiagnostics(clearImageSourceDiagnostics);
     } catch (error) {
       if (
         mountedRef.current &&
@@ -437,10 +495,142 @@ export function ProjectConverter() {
       const picked = readWebkitDirectoryFiles(event.currentTarget.files);
       setSelectedFiles((current) => mergePickedDirectoryFiles(current, picked));
       setDirectoryCount((count) => count + 1);
-      setRuntimeDiagnostics((current) => current.filter((item) => item.code !== "DIRECTORY_UNSUPPORTED"));
+      setRuntimeDiagnostics(clearImageSourceDiagnostics);
+    } else if (isCurrent) {
+      setRuntimeDiagnostics((current) => replaceImageSourceDiagnostic(
+        current,
+        {
+          severity: "error",
+          code: "DIRECTORY_EMPTY_FILE_LIST",
+          message: uiCopy[language].directoryEmpty,
+        },
+      ));
     }
     event.currentTarget.value = "";
-  }, []);
+  }, [language]);
+
+  const chooseImageFiles = useCallback(() => {
+    const currentLoaded = loadedRef.current;
+    if (!currentLoaded?.project || projectUnsupported || directoryMatchingRef.current) return;
+    imageFilesContextRef.current = {
+      generation: generationRef.current,
+      loaded: currentLoaded,
+    };
+    imageFilesInput.current?.click();
+  }, [projectUnsupported]);
+
+  const handleImageFiles = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const context = imageFilesContextRef.current;
+    imageFilesContextRef.current = null;
+    const files = event.currentTarget.files ? Array.from(event.currentTarget.files) : [];
+    event.currentTarget.value = "";
+    const isCurrent = Boolean(
+      context &&
+        mountedRef.current &&
+        generationRef.current === context.generation &&
+        loadedRef.current === context.loaded,
+    );
+    if (!isCurrent || files.length === 0 || !context?.loaded.project) return;
+
+    const picked = readWebkitDirectoryFiles(files);
+    const losesDirectories = picked.some((item) => !item.relativePath.includes("/"));
+    if (losesDirectories && hasDuplicateProjectBasenames(context.loaded.project)) {
+      setRuntimeDiagnostics((current) => replaceImageSourceDiagnostic(
+        current,
+        {
+          severity: "error",
+          code: "IMAGE_FILES_NEED_RELATIVE_PATHS",
+          message: uiCopy[language].imageFilesNeedPaths,
+        },
+      ));
+      return;
+    }
+    setSelectedFiles((current) => mergePickedDirectoryFiles(current, picked));
+    setRuntimeDiagnostics(clearImageSourceDiagnostics);
+  }, [language]);
+
+  const chooseImageZip = useCallback(() => {
+    const currentLoaded = loadedRef.current;
+    if (!currentLoaded?.project || projectUnsupported || directoryMatchingRef.current) return;
+    imageZipContextRef.current = {
+      generation: generationRef.current,
+      loaded: currentLoaded,
+    };
+    imageZipInput.current?.click();
+  }, [projectUnsupported]);
+
+  const handleImageZip = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const context = imageZipContextRef.current;
+    imageZipContextRef.current = null;
+    const zipFile = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!context || !zipFile || !context.loaded.project) return;
+    const isCurrent = () =>
+      mountedRef.current &&
+      generationRef.current === context.generation &&
+      loadedRef.current === context.loaded;
+    if (!isCurrent()) return;
+
+    const selectionId = [
+      "image-zip",
+      context.generation,
+      ++imageZipSequenceRef.current,
+    ].join("::");
+
+    directoryMatchingRef.current = true;
+    setDirectoryMatching(true);
+    setProgress({ stage: "matching" });
+    let archive: OpenArchive | undefined;
+    try {
+      archive = await openValidatedZip(zipFile);
+      if (!isCurrent()) {
+        await archive.close();
+        return;
+      }
+      const imageEntries = archive.entries
+        .filter((entry) => isSupportedImagePath(entry.name))
+        .map((entry) => ({
+          entryName: entry.name,
+          relativePath: entry.name,
+          size: entry.uncompressedSize,
+        }));
+      if (imageEntries.length === 0) {
+        await archive.close();
+        archive = undefined;
+        setRuntimeDiagnostics((current) => replaceImageSourceDiagnostic(
+          current,
+          {
+            severity: "error",
+            code: "IMAGE_ZIP_EMPTY",
+            message: uiCopy[language].imageZipEmpty,
+          },
+        ));
+        return;
+      }
+      selectedImageArchivesRef.current.set(selectionId, archive);
+      setSelectedFiles((current) => mergeArchiveImageEntries(
+        current,
+        archive as OpenArchive,
+        imageEntries,
+        selectionId,
+      ));
+      setRuntimeDiagnostics(clearImageSourceDiagnostics);
+    } catch (error) {
+      await archive?.close().catch(() => undefined);
+      if (isCurrent()) {
+        setRuntimeDiagnostics((current) => replaceImageSourceDiagnostic(
+          current,
+          diagnosticFromError(error, uiCopy[language].imageZipEmpty),
+        ));
+      }
+    } finally {
+      if (isCurrent()) {
+        directoryMatchingRef.current = false;
+        setDirectoryMatching(false);
+        setProgress(null);
+      }
+    }
+  }, [language]);
 
   const save = useCallback(async () => {
     if (!loaded?.project || !target || !canSave || directoryMatchingRef.current) return;
@@ -556,7 +746,9 @@ export function ProjectConverter() {
       if (!isCurrent()) return;
       setProgress(null);
       if (error instanceof WriterDiagnosticsError) {
-        setRuntimeDiagnostics(error.diagnostics.map(toUiDiagnostic));
+        setRuntimeDiagnostics(
+          error.diagnostics.map((item) => toUiDiagnostic(item, language)),
+        );
       } else {
         setRuntimeDiagnostics((current) => [...current, diagnosticFromError(error, uiCopy[language].saveFailed)]);
       }
@@ -576,7 +768,7 @@ export function ProjectConverter() {
     ? buildImageSummary(project, embeddedImages, matchReport, directoryCount, directoryMatching)
     : null;
   const diagnostics = [
-    ...(loaded?.parseResult.diagnostics ?? []).filter((item) => item.severity !== "info").map(toUiDiagnostic),
+    ...toUiDiagnostics(loaded?.parseResult.diagnostics ?? [], language),
     ...runtimeDiagnostics,
     ...(relativeSubvisionPath
       ? [{
@@ -619,6 +811,8 @@ export function ProjectConverter() {
           setRuntimeDiagnostics((current) => current.filter((item) => item.sticky));
         }}
         onSelectDirectory={chooseDirectory}
+        onSelectImageFiles={chooseImageFiles}
+        onSelectImageZip={chooseImageZip}
         onConfirmationChange={setConfirmationChecked}
         onLanguageChange={setLanguage}
         onSave={save}
@@ -638,6 +832,21 @@ export function ProjectConverter() {
         accept="image/*"
         multiple
         onChange={handleFallbackDirectory}
+      />
+      <input
+        ref={imageFilesInput}
+        hidden
+        type="file"
+        accept=".png,.jpg,.jpeg,.bmp,.gif,.webp,image/png,image/jpeg,image/bmp,image/gif,image/webp"
+        multiple
+        onChange={handleImageFiles}
+      />
+      <input
+        ref={imageZipInput}
+        hidden
+        type="file"
+        accept=".zip,application/zip,application/x-zip-compressed"
+        onChange={handleImageZip}
       />
     </>
   );
@@ -815,8 +1024,91 @@ function containerProgress(value: ContainerProgress): ConverterProgress {
   };
 }
 
-function toUiDiagnostic(item: ProjectDiagnostic): ConverterDiagnostic {
-  return { severity: item.severity, code: item.code, path: shortPath(item.path), message: item.message };
+function toUiDiagnostics(
+  diagnostics: readonly ProjectDiagnostic[],
+  language: ConverterLanguage,
+): ConverterDiagnostic[] {
+  const result: ConverterDiagnostic[] = [];
+  let trainingSettingsAdded = false;
+  for (const item of diagnostics) {
+    if (item.severity === "info") continue;
+    const nodeName = String(item.details?.nodeName ?? "");
+    if (
+      item.code === "V1_UNMAPPED_XML_NODE" &&
+      (nodeName === "TrainingParameter" || nodeName === "AugmentationParameter")
+    ) {
+      if (!trainingSettingsAdded) {
+        result.push({
+          severity: "warning",
+          message: uiCopy[language].trainingSettingsNotMapped,
+        });
+        trainingSettingsAdded = true;
+      }
+      continue;
+    }
+    result.push(toUiDiagnostic(item, language));
+  }
+  return result;
+}
+
+function toUiDiagnostic(
+  item: ProjectDiagnostic,
+  language: ConverterLanguage,
+): ConverterDiagnostic {
+  const isUnmappedV1 =
+    item.code === "V1_UNMAPPED_XML_NODE" ||
+    item.code === "V1_UNKNOWN_XML_NODE" ||
+    item.code === "V1_UNKNOWN_XML_ATTRIBUTE";
+  return {
+    severity: item.severity,
+    code: item.code,
+    path: shortPath(item.path),
+    message: isUnmappedV1 ? uiCopy[language].unmappedSourceField : item.message,
+  };
+}
+
+const IMAGE_SOURCE_DIAGNOSTIC_CODES = new Set([
+  "DIRECTORY_UNSUPPORTED",
+  "DIRECTORY_EMPTY_FILE_LIST",
+  "IMAGE_FILES_NEED_RELATIVE_PATHS",
+  "IMAGE_ZIP_EMPTY",
+  "ZIP_TOO_SMALL",
+  "ZIP_INVALID",
+]);
+
+function clearImageSourceDiagnostics(
+  diagnostics: readonly RuntimeDiagnostic[],
+): RuntimeDiagnostic[] {
+  return diagnostics.filter(
+    (item) =>
+      !item.code ||
+      (!IMAGE_SOURCE_DIAGNOSTIC_CODES.has(item.code) &&
+        !item.code.startsWith("ZIP_")),
+  );
+}
+
+function replaceImageSourceDiagnostic(
+  diagnostics: readonly RuntimeDiagnostic[],
+  next: RuntimeDiagnostic,
+): RuntimeDiagnostic[] {
+  return [...clearImageSourceDiagnostics(diagnostics), next];
+}
+
+function hasDuplicateProjectBasenames(project: ProjectIR): boolean {
+  const names = project.files.map((file) =>
+    file.fileName.normalize("NFKC").toLocaleLowerCase("en-US"),
+  );
+  return new Set(names).size !== names.length;
+}
+
+function isSupportedImagePath(value: string): boolean {
+  return /\.(?:png|jpe?g|bmp|gif|webp)$/iu.test(value);
+}
+
+async function closeOpenArchives(archives: Iterable<OpenArchive>): Promise<void> {
+  await Promise.all(
+    Array.from(archives, (archive) => archive.close().catch(() => undefined)),
+  );
 }
 
 function diagnosticFromError(error: unknown, fallback: string): RuntimeDiagnostic {

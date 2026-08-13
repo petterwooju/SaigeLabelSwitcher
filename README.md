@@ -13,7 +13,13 @@ SaigeVision V1 / V2 项目文件的纯浏览器双向转换 Webapp。项目、�
 | V2 `.visionproj` | V1 SVPA ZIP |
 | V2 `.subvisionproj` | V1 `.srproj`、补图后的 SVPA ZIP |
 
-`.visionproj` 与 SVPA ZIP 包含图片；`.subvisionproj` 与 `.srproj` 不包含图片。需要图片而源文件不带图时，页面会要求用户授权一个或多个图片目录，并在 100% 唯一匹配后启用转换。
+`.visionproj` 与 SVPA ZIP 包含图片；`.subvisionproj` 与 `.srproj` 不包含图片。需要图片而源文件不带图时，页面会要求用户补充图片，并在 100% 唯一匹配后启用转换。
+
+- 桌面版 Edge / Chrome：优先选择一个或多个图片目录。
+- 不支持目录读取的内置浏览器：可选择保留原目录结构的图片 ZIP（包括本工具导出的 SVPA ZIP）。ZIP 图片按需读取，不会整包上传或一次性解压到内存。
+- 直接多选图片文件只适用于文件名全局唯一的项目；存在 `000.png` 等同名图片时会主动阻断，避免把错误图片写入项目。
+
+V1 的训练参数和数据增强参数目前没有经过验证的 V2 对应字段，因此不会写入 V2 项目；图片、类别、分类标签和 Training / Validation 划分不受影响。导入 V2 后请重新确认训练设置。`MaskingParameter = Not set` 会作为“未启用遮罩”处理，不再显示为兼容性警告。
 
 Detection、Segmentation、ROD、OCR 等类型会明确阻断，不会“尽力转换”或静默丢弃标注。
 

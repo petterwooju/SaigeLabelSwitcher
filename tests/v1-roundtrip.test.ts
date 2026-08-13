@@ -78,6 +78,30 @@ test("parses Classification core fields and retains unknown-node diagnostics", (
   assert.equal(result.compatibility.status, "confirmation-required");
 });
 
+test("maps a disabled V1 masking parameter to V2 roiMode without a drop warning", () => {
+  const xml = classificationFixture.replace(
+    "  <FutureOption Answer=\"42\"><Nested /></FutureOption>",
+    "  <MaskingParameter><Type>Not set</Type></MaskingParameter>",
+  );
+  const result = parseV1Srproj({ xmlText: xml, fileName: "masking.srproj" });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.project.project.roiMode, "no");
+  assert.equal(result.compatibility.status, "compatible");
+  assert.ok(
+    result.diagnostics.some(
+      (item) =>
+        item.code === "V1_MASKING_NOT_SET" &&
+        item.disposition === "preserve" &&
+        item.severity === "info",
+    ),
+  );
+  assert.equal(
+    result.diagnostics.some((item) => item.code === "V1_UNMAPPED_XML_NODE"),
+    false,
+  );
+});
+
 test("writes stable UTF-8 XML and round-trips Classification semantics", () => {
   const initial = parseV1Srproj({
     xmlText: classificationFixture,

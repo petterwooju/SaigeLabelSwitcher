@@ -213,6 +213,7 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
       type,
       rawType,
       description: "",
+      ...(hasNoopMaskingParameter(root) ? { roiMode: "no" } : {}),
       ...(modifiedAt !== undefined ? { modifiedAt } : {}),
       raw: projectRaw,
     },
@@ -635,6 +636,10 @@ function reportRootNodes(context: ParseContext, root: XmlElement): void {
     indexes.set(node.name, index + 1);
     if (CORE_ROOT_ELEMENTS.has(node.name)) continue;
     const path = `$.Project.${node.name}[${index}]`;
+    if (node.name === "MaskingParameter" && isNoopMaskingParameter(node)) {
+      reportPreservedNoopMasking(context, node, path);
+      continue;
+    }
     reportUnmappedNode(
       context,
       node,
@@ -644,6 +649,48 @@ function reportRootNodes(context: ParseContext, root: XmlElement): void {
         : "V1_UNKNOWN_XML_NODE",
     );
   }
+}
+
+function hasNoopMaskingParameter(root: XmlElement): boolean {
+  return root.children.some(
+    (node) => node.name === "MaskingParameter" && isNoopMaskingParameter(node),
+  );
+}
+
+function isNoopMaskingParameter(node: XmlElement): boolean {
+  if (node.attributes.size > 0 || node.children.length !== 1) return false;
+  const type = node.children[0];
+  return Boolean(
+    type &&
+      type.name === "Type" &&
+      type.attributes.size === 0 &&
+      type.children.length === 0 &&
+      type.textParts.join("").trim().toLocaleLowerCase("en-US") === "not set",
+  );
+}
+
+function reportPreservedNoopMasking(
+  context: ParseContext,
+  node: XmlElement,
+  path: string,
+): void {
+  const completeOuterXml = context.source.slice(node.start, node.end);
+  const outerXml = completeOuterXml.slice(0, 1024);
+  const details: Record<string, JsonValue> = {
+    nodeName: node.name,
+    outerXml,
+    truncated: completeOuterXml.length > outerXml.length,
+    mappedRoiMode: "no",
+  };
+  context.unknownNodes.push({ path, ...details });
+  compatibility(context, {
+    code: "V1_MASKING_NOT_SET",
+    severity: "info",
+    disposition: "preserve",
+    path,
+    message: "V1 masking is not enabled; the V2 project will use roiMode 'no'.",
+    details,
+  });
 }
 
 function reportUnknownChildren(

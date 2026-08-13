@@ -130,6 +130,8 @@ export interface ConverterShellProps {
   readonly onDrop: (files: readonly File[]) => void;
   readonly onTargetChange: (targetId: string) => void;
   readonly onSelectDirectory: () => void;
+  readonly onSelectImageFiles: () => void;
+  readonly onSelectImageZip: () => void;
   readonly onSave: () => void;
   readonly onReset: () => void;
   readonly onLanguageChange: (language: ConverterLanguage) => void;
@@ -163,6 +165,10 @@ const copy = {
     sourceImagesReadyDetail: "已从源项目读取全部图片，无需另选目录。",
     selectDirectory: "选择图片目录",
     addDirectory: "继续添加目录",
+    selectImageFiles: "选择图片文件",
+    selectImageZip: "选择图片 ZIP",
+    imageSourceAlternatives: "当前浏览器无法读取文件夹时，可选择保留目录结构的图片 ZIP。仅当图片文件名不重复时，才适合直接多选图片文件。",
+    imageSourceGroupLabel: "添加项目图片",
     matched: "已匹配",
     missing: "缺失",
     ambiguous: "重名",
@@ -251,6 +257,10 @@ const copy = {
     sourceImagesReadyDetail: "All images were read from the source project. No folder is needed.",
     selectDirectory: "Choose image folder",
     addDirectory: "Add another folder",
+    selectImageFiles: "Choose image files",
+    selectImageZip: "Choose image ZIP",
+    imageSourceAlternatives: "If this browser cannot read folders, choose an image ZIP that preserves the folder structure. Direct file selection is safe only when image filenames are unique.",
+    imageSourceGroupLabel: "Add project images",
     matched: "Matched",
     missing: "Missing",
     ambiguous: "Duplicates",
@@ -339,6 +349,10 @@ const copy = {
     sourceImagesReadyDetail: "원본 프로젝트에서 모든 이미지를 읽었습니다. 폴더를 다시 선택할 필요가 없습니다.",
     selectDirectory: "이미지 폴더 선택",
     addDirectory: "다른 폴더 추가",
+    selectImageFiles: "이미지 파일 선택",
+    selectImageZip: "이미지 ZIP 선택",
+    imageSourceAlternatives: "이 브라우저가 폴더를 읽지 못하면 폴더 구조를 유지한 이미지 ZIP을 선택하세요. 이미지 파일명이 모두 고유한 경우에만 파일을 직접 선택할 수 있습니다.",
+    imageSourceGroupLabel: "프로젝트 이미지 추가",
     matched: "일치",
     missing: "누락",
     ambiguous: "중복",
@@ -434,6 +448,8 @@ export function ConverterShell({
   onDrop,
   onTargetChange,
   onSelectDirectory,
+  onSelectImageFiles,
+  onSelectImageZip,
   onSave,
   onReset,
   onLanguageChange,
@@ -556,6 +572,8 @@ export function ConverterShell({
                   language={language}
                   disabled={isBusy || status === "success"}
                   onSelectDirectory={onSelectDirectory}
+                  onSelectImageFiles={onSelectImageFiles}
+                  onSelectImageZip={onSelectImageZip}
                 />
               ) : null}
 
@@ -871,12 +889,16 @@ function ImageSection({
   language,
   disabled,
   onSelectDirectory,
+  onSelectImageFiles,
+  onSelectImageZip,
 }: {
   summary: ImageMatchSummary;
   text: LocalizedCopy;
   language: ConverterLanguage;
   disabled: boolean;
   onSelectDirectory: () => void;
+  onSelectImageFiles: () => void;
+  onSelectImageZip: () => void;
 }) {
   const isSourceReady = summary.state === "source-ready";
   const isMatching = summary.state === "matching";
@@ -900,14 +922,39 @@ function ImageSection({
             {text.sourceImagesReady}
           </span>
         ) : summary.canSelectDirectory !== false ? (
-          <button
-            className="converter-button converter-button--secondary"
-            type="button"
-            disabled={disabled || isMatching}
-            onClick={onSelectDirectory}
+          <div
+            className="converter-image-actions"
+            role="group"
+            aria-label={text.imageSourceGroupLabel}
           >
-            {summary.directoryCount ? text.addDirectory : text.selectDirectory}
-          </button>
+            <button
+              className="converter-button converter-button--secondary"
+              type="button"
+              disabled={disabled || isMatching}
+              onClick={onSelectDirectory}
+            >
+              {summary.directoryCount ? text.addDirectory : text.selectDirectory}
+            </button>
+            <div className="converter-image-actions__alternatives">
+              <button
+                className="converter-button converter-button--quiet"
+                type="button"
+                disabled={disabled || isMatching}
+                onClick={onSelectImageZip}
+              >
+                {text.selectImageZip}
+              </button>
+              <button
+                className="converter-button converter-button--quiet"
+                type="button"
+                disabled={disabled || isMatching}
+                onClick={onSelectImageFiles}
+              >
+                {text.selectImageFiles}
+              </button>
+            </div>
+            <small>{text.imageSourceAlternatives}</small>
+          </div>
         ) : null}
       </div>
 
