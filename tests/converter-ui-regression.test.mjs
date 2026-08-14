@@ -45,6 +45,8 @@ test("keeps language, parse failure, dimension-only copy, and save-picker busy s
 
   assert.match(converter, /document\.documentElement\.lang = localeByLanguage\[language\]/);
   assert.match(converter, /loaded\?\.parseResult\.ok && loaded\.project/);
+  assert.match(converter, /parserAlreadyExplainedFailure/);
+  assert.match(converter, /diagnostic\.severity === "error"/);
   assert.match(shell, /summary\.purpose === "dimensions"/);
   assert.match(shell, /imageHelpDimensions/);
   assert.match(shell, /progress\?\.stage === "choosing-save-location"/);

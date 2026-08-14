@@ -145,14 +145,35 @@ test("V1 parser enforces node, attribute, class, file, and UTF-8 path limits", (
   assert.ok(hasCode(nodeResult, "V1_XML_NODE_LIMIT_EXCEEDED"));
 
   const attributes = Array.from(
-    { length: V1_PROJECT_LIMITS.maxAttributes + 1 },
+    { length: V1_PROJECT_LIMITS.maxAttributesPerElement + 1 },
     (_, index) => `a${index}="x"`,
   ).join(" ");
   const attributeResult = parseV1Srproj({
     xmlText: v1Project("C:/a.png", `<x ${attributes}/>`),
   });
   assert.equal(attributeResult.ok, false);
-  assert.ok(hasCode(attributeResult, "V1_XML_ATTRIBUTE_LIMIT_EXCEEDED"));
+  assert.ok(hasCode(attributeResult, "V1_XML_ELEMENT_ATTRIBUTE_LIMIT_EXCEEDED"));
+
+  const contourPoints = '<Point X="1" Y="2"/>'.repeat(2_050);
+  const segmentationXml = v1Project("C:/a.png")
+    .replace("<Type>Classification</Type>", "<Type>Segmentation</Type>")
+    .replace(
+      "<ClassIndexOfLabel>0</ClassIndexOfLabel>",
+      `<LabelGroup><IsNormal>false</IsNormal><NumberOfLabels>1</NumberOfLabels><Label><ClassIndex>0</ClassIndex><Type>Contours</Type><ContourGroup><Contour Type="Outer">${contourPoints}</Contour></ContourGroup></Label></LabelGroup>`,
+    );
+  const contourResult = parseV1Srproj({
+    xmlText: segmentationXml,
+  });
+  assert.equal(contourResult.ok, true);
+  assert.ok(hasCode(contourResult, "V1_PROJECT_TYPE_UNSUPPORTED"));
+  assert.equal(
+    hasCode(contourResult, "V1_XML_ATTRIBUTE_LIMIT_EXCEEDED"),
+    false,
+  );
+  assert.equal(
+    hasCode(contourResult, "V1_XML_ELEMENT_ATTRIBUTE_LIMIT_EXCEEDED"),
+    false,
+  );
 
   const classResult = parseV1Srproj({
     xmlText: v1Project().replace(

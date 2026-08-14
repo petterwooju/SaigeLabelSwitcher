@@ -481,7 +481,14 @@ export function ProjectConverter() {
         setPendingSource(null);
         setProgress(null);
         if (!next.parseResult.ok || !next.project) {
-          setRuntimeDiagnostics([{ severity: "error", code: "PROJECT_PARSE_FAILED" }]);
+          const parserAlreadyExplainedFailure = next.parseResult.diagnostics.some(
+            (diagnostic) => diagnostic.severity === "error",
+          );
+          setRuntimeDiagnostics(
+            parserAlreadyExplainedFailure
+              ? []
+              : [{ severity: "error", code: "PROJECT_PARSE_FAILED" }],
+          );
           setStatus("error");
           return;
         }

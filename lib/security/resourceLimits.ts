@@ -14,7 +14,11 @@ export const PROJECT_JSON_MAX_VALUES = 1_000_000;
 
 export const V1_PROJECT_LIMITS = Object.freeze({
   maxNodes: 250_000,
-  maxAttributes: 4_096,
+  // Segmentation contours store every point as <Point X="…" Y="…"/>.
+  // Keep a document-wide ceiling for memory safety, while allowing normal
+  // contour-heavy projects to exceed the much smaller per-element limit.
+  maxAttributes: 524_288,
+  maxAttributesPerElement: 64,
   maxClasses: 10_000,
   maxFiles: 20_000,
 });

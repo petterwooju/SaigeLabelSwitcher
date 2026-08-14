@@ -1051,6 +1051,7 @@ function parseXml(source: string): XmlElement {
       token,
       opening,
       V1_PROJECT_LIMITS.maxAttributes - attributeCount,
+      V1_PROJECT_LIMITS.maxAttributesPerElement,
     );
     nodeCount += 1;
     if (nodeCount > V1_PROJECT_LIMITS.maxNodes) {
@@ -1126,6 +1127,7 @@ function parseStartTag(
   token: string,
   offset: number,
   remainingAttributeBudget: number,
+  perElementAttributeBudget: number,
 ): {
   readonly name: string;
   readonly attributes: ReadonlyMap<string, string>;
@@ -1160,15 +1162,22 @@ function parseStartTag(
     const valueStart = cursor + 1;
     const valueEnd = source.indexOf(quote, valueStart);
     if (valueEnd < 0) throw xmlError(`Attribute '${attributeName}' is unterminated.`, offset + cursor);
-    const value = decodeXmlEntities(source.slice(valueStart, valueEnd), offset + valueStart);
-    attributes.set(attributeName, value);
-    if (attributes.size > remainingAttributeBudget) {
+    if (attributes.size >= perElementAttributeBudget) {
+      throw xmlLimitError(
+        "V1_XML_ELEMENT_ATTRIBUTE_LIMIT_EXCEEDED",
+        `One XML element contains more than ${perElementAttributeBudget} attributes.`,
+        offset + cursor,
+      );
+    }
+    if (attributes.size >= remainingAttributeBudget) {
       throw xmlLimitError(
         "V1_XML_ATTRIBUTE_LIMIT_EXCEEDED",
         `XML attribute count exceeds ${V1_PROJECT_LIMITS.maxAttributes}.`,
         offset + cursor,
       );
     }
+    const value = decodeXmlEntities(source.slice(valueStart, valueEnd), offset + valueStart);
+    attributes.set(attributeName, value);
     cursor = valueEnd + 1;
   }
   return { name, attributes, selfClosing };
