@@ -34,7 +34,9 @@
 
 ## 仍需发布凭据处理的事项
 
-`public/downloads/SaigeVisionProjectAssistant.ZipFixer.exe` 当前没有 Authenticode 签名，本机也没有可用的组织代码签名证书。内部、所有者私有部署可依赖固定 SHA-256 检查；面向公众或企业分发前必须：
+`public/downloads/SaigeVisionProjectAssistant.ZipFixer.exe` 当前没有 Authenticode 签名，本机也没有可用的组织代码签名证书。v0.0.1 公开 beta 与公开源码仓库暂以固定 SHA-256 提供评估版本；哈希只能证明字节与仓库发布物一致，不能证明发布者身份，Windows 或企业策略可能阻止运行。不得引导用户绕过 SmartScreen 或企业策略。
+
+进入稳定版或企业分发前必须：
 
 1. 使用组织证书签名；
 2. 添加可信时间戳；

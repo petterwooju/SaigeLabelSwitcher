@@ -24,7 +24,10 @@ test("server-renders the SaigeVision converter shell", async () => {
   assert.match(html, /v0\.0\.1/);
   assert.match(html, /Classification/);
   assert.match(html, /Segmentation/);
-  assert.match(html, /https:\/\/example\.test\/saigevision-converter-preview\.png/);
+  assert.match(
+    html,
+    /https:\/\/saige-label-switcher-beta\.saigeai\.com\/saigevision-converter-preview\.png/,
+  );
   assert.doesNotMatch(html, /localhost:3000\/saigevision-converter-preview\.png/);
   assert.match(html, /<meta name="robots" content="noindex, nofollow, noarchive"/i);
   assert.equal(response.headers.get("cache-control"), "no-store");
@@ -32,15 +35,19 @@ test("server-renders the SaigeVision converter shell", async () => {
   assert.doesNotMatch(html, /Your site is taking shape|Building your site|codex-preview/i);
 });
 
-test("ignores spoofed proxy and internal origin headers", async () => {
+test("keeps canonical metadata fixed when origin headers are spoofed", async () => {
   const response = await render("https://trusted.example/", {
     "x-forwarded-host": "evil.example",
     "x-forwarded-proto": "http",
     "x-saigevision-request-origin": "https://evil.example",
   });
   const html = await response.text();
-  assert.match(html, /https:\/\/trusted\.example\/saigevision-converter-preview\.png/);
+  assert.match(
+    html,
+    /https:\/\/saige-label-switcher-beta\.saigeai\.com\/saigevision-converter-preview\.png/,
+  );
   assert.doesNotMatch(html, /evil\.example/);
+  assert.doesNotMatch(html, /trusted\.example/);
 });
 
 test("removes starter assets and keeps the converter client-side", async () => {

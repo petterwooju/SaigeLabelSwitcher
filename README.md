@@ -38,14 +38,24 @@ npm.cmd run dev
 
 打开终端显示的本地地址。建议使用最新版桌面 Edge 或 Chrome，以获得目录选择和大文件流式写盘支持。
 
+## 发布
+
+生产站点通过 GitHub Pages 从 `main` 分支自动构建和发布：
+<https://saige-label-switcher-beta.saigeai.com/>。
+
+该站点是公开静态页面，但项目文件、标注和图片仍只由浏览器本机读取与写入；应用没有项目上传接口、数据库或对象存储。上线时自定义域名的 DNS CNAME 目标为 `petterwooju.github.io`，与 `svpa-export-beta.saigeai.com` 使用相同的发布方式。
+
 ## 验证
 
 ```powershell
 npm.cmd run check
+npm.cmd run test:pages
 npm.cmd run audit:dependencies
 ```
 
 `check` 固定执行 typecheck、lint、单元/安全测试、全新生产构建和构建产物 SSR 测试。测试覆盖四格式内容识别、V1/V2 round-trip、原生 V2 2.7.8 fixture、SVPA/vision 容器、官方 SVPA 路径规则、图片目录匹配、图片真实性、ZIP/XML/JSON 资源限制、取消操作和大文件流式保存门禁。
+
+`test:pages` 生成并核验 GitHub Pages 静态站点，包括正式域名元数据、v0.0.1 页面内容和路径修复助手的 SHA-256。
 
 `audit:dependencies` 执行 npm 官方审计，并验证 Vinext 使用的 `image-size` 下游安全补丁与生产构建边界。当前审计结果为 0 个已知漏洞；补丁来源与回移说明见安全文档。
 
@@ -57,4 +67,4 @@ npm.cmd run audit:dependencies
 
 SVPA 包中的路径修复助手来自参考项目 `SaigeVision-v1-project-export`。应用在写入每个 SVPA 包之前会固定校验其大小和 SHA-256；当前固定值为 `A9831278CB21D6AFD627ABB55344545800829F2F5866AA34738609DD446F3A94`。应用不会执行输入 ZIP 中的任何可执行文件。
 
-当前助手尚未取得可信 Authenticode 代码签名。内部/私有发布可通过上述哈希核验；公开或企业分发前仍需使用组织的代码签名证书和可信时间戳重新签名，并同步更新固定哈希。这是发布凭据事项，不应通过让用户绕过 SmartScreen 来处理。
+当前公开 beta 与公开源码仓库中的助手尚未取得可信 Authenticode 代码签名；固定哈希只能确认下载内容与本仓库发布物一致，不能证明发布者身份，Windows 或企业安全策略可能阻止运行。不得引导用户绕过 SmartScreen 或企业策略。进入稳定版或企业分发前，仍需使用组织代码签名证书和可信时间戳重新签名，并同步更新固定哈希与 CI 验签。
