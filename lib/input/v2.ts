@@ -2,6 +2,7 @@ import type {
   ArchiveImageSourceIR,
   CompatibilityDisposition,
   CompatibilitySummary,
+  ContourRingRole,
   DiagnosticSeverity,
   ImageSourceIR,
   JsonObject,
@@ -166,6 +167,7 @@ const LABEL_KNOWN_FIELDS = new Set([
   "labelBitmap",
   "labelPolygon",
   "labelContour",
+  "contourSize",
 ]);
 
 /** Parse a V2 light project. The file carries JSON and external paths only. */
@@ -297,9 +299,14 @@ function parseProjectJson(text: string, context: ParseContext): ProjectParseResu
   );
   if (!classValues || !datasetValues || !fileValues) return failure(context.diagnostics);
 
-  const classes = parseClasses(context, classValues);
+  const classes = parseClasses(context, classValues, type);
   const datasets = parseDatasets(context, datasetValues);
   if (!classes || !datasets) return failure(context.diagnostics);
+
+  const segmentationNormalClassIndex =
+    type === "segmentation"
+      ? identifySegmentationNormalClass(context, classes)
+      : undefined;
 
   if (datasets.length > 1) {
     compatibility(context, {
@@ -312,7 +319,14 @@ function parseProjectJson(text: string, context: ParseContext): ProjectParseResu
     });
   }
 
-  const files = parseFiles(context, fileValues, classes, datasets, type);
+  const files = parseFiles(
+    context,
+    fileValues,
+    classes,
+    datasets,
+    type,
+    segmentationNormalClassIndex,
+  );
   if (!files) return failure(context.diagnostics);
 
   reportKnownLosses(context, projectRaw, classes, datasets, files);
@@ -574,6 +588,7 @@ function validateJsonValueBudget(
 function parseClasses(
   context: ParseContext,
   values: readonly JsonObject[],
+  projectType: ProjectType,
 ): ProjectClassIR[] | undefined {
   type ParsedClass = ProjectClassIR & { readonly requestedIndex?: number };
   const parsed: ParsedClass[] = [];
@@ -601,7 +616,7 @@ function parseClasses(
         message: "V2 class descriptions are retained in raw data but have no V1 field.",
       });
     }
-    if (typeof raw.isNg === "boolean") {
+    if (typeof raw.isNg === "boolean" && projectType !== "segmentation") {
       compatibility(context, {
         code: "V2_CLASS_NG_FLAG_NOT_IN_V1",
         disposition: "drop",
@@ -687,6 +702,53 @@ function parseClasses(
     .map((item) => withoutRequestedIndex(item, item.index));
 }
 
+function identifySegmentationNormalClass(
+  context: ParseContext,
+  classes: readonly ProjectClassIR[],
+): number | undefined {
+  const candidates = classes.filter(
+    (item) =>
+      item.index === 0 &&
+      nonNegativeInteger(item.raw.classNo) === 0 &&
+      normalizedClassName(item.name) === "ok" &&
+      item.isNg === false,
+  );
+  const defectClassesAreExplicit = classes.every(
+    (item) => candidates.includes(item) || item.isNg === true,
+  );
+
+  if (candidates.length !== 1 || !defectClassesAreExplicit) {
+    compatibility(context, {
+      code: "V2_SEGMENTATION_CLASS_STRUCTURE_INVALID",
+      disposition: "block",
+      severity: "error",
+      path: "$.project.classInfos",
+      message:
+        "A V2 Segmentation project must declare one classNo 0 class named 'OK' with isNg=false, and every defect class must declare isNg=true.",
+      details: {
+        okCandidateCount: candidates.length,
+        classCount: classes.length,
+      },
+    });
+    return undefined;
+  }
+
+  const normalClass = candidates[0]!;
+  compatibility(context, {
+    code: "V2_SEGMENTATION_OK_CLASS_RECOGNIZED",
+    disposition: "rebuild",
+    severity: "info",
+    path: `$.project.classInfos[${normalClass.sourceIndex}]`,
+    message:
+      "The structural V2 OK class is retained in the IR and rebuilt as V1 normal-image state during conversion.",
+    details: {
+      normalClassIndex: normalClass.index,
+      defectClassCount: classes.length - 1,
+    },
+  });
+  return normalClass.index;
+}
+
 function withoutRequestedIndex(
   item: ProjectClassIR & { readonly requestedIndex?: number },
   index: number,
@@ -749,6 +811,7 @@ function parseFiles(
   classes: readonly ProjectClassIR[],
   datasets: readonly ProjectDatasetIR[],
   projectType: ProjectType,
+  segmentationNormalClassIndex: number | undefined,
 ): ProjectFileIR[] | undefined {
   const ids = new Map<string, number>();
   const paths = new Map<string, number>();
@@ -818,7 +881,7 @@ function parseFiles(
 
     const datasetIndex = resolveDatasetIndex(context, raw, datasets, path);
     const fileClassIndex =
-      projectType === "classification"
+      projectType === "classification" || projectType === "segmentation"
         ? resolveClassIndex(context, raw, classes, path, hasClassReference(raw))
         : undefined;
 
@@ -899,6 +962,17 @@ function parseFiles(
     );
     const labels = parsedLabels.labels;
     validateGeometryBounds(context, labels, width, height, path);
+    const segmentationIsNormal =
+      projectType === "segmentation"
+        ? parseSegmentationFileState(
+            context,
+            raw,
+            path,
+            labels,
+            fileClassIndex,
+            segmentationNormalClassIndex,
+          )
+        : undefined;
 
     files.push({
       sourceId,
@@ -909,6 +983,9 @@ function parseFiles(
       ...(width !== undefined ? { width } : {}),
       ...(height !== undefined ? { height } : {}),
       ...(typeof raw.isLabeled === "boolean" ? { isLabeled: raw.isLabeled } : {}),
+      ...(segmentationIsNormal !== undefined
+        ? { isNormal: segmentationIsNormal }
+        : {}),
       ...(optionalString(raw.datasetName) ? { datasetName: optionalString(raw.datasetName) } : {}),
       ...(datasetIndex !== undefined ? { datasetIndex } : {}),
       ...(parsedLabels.classificationClassIndex !== undefined
@@ -1024,6 +1101,9 @@ function parseLabels(
     reportUnknownFields(context, raw, LABEL_KNOWN_FIELDS, path, "label");
     const classIndex = resolveClassIndex(context, raw, classes, path, true);
     const kind = inferLabelKind(projectType, raw);
+    if (projectType === "segmentation") {
+      validateContourSize(context, raw.contourSize, path);
+    }
     const geometry = parseLabelGeometry(context, raw, kind, path);
     if (kind === "unknown") {
       compatibility(context, {
@@ -1396,6 +1476,93 @@ function reportClassificationStateConflict(
   });
 }
 
+function parseSegmentationFileState(
+  context: ParseContext,
+  fileRaw: JsonObject,
+  filePath: string,
+  labels: readonly ProjectLabelIR[],
+  fileClassIndex: number | undefined,
+  normalClassIndex: number | undefined,
+): boolean | undefined {
+  const isLabeled =
+    typeof fileRaw.isLabeled === "boolean" ? fileRaw.isLabeled : undefined;
+
+  if (labels.length > 0) {
+    if (isLabeled === false) {
+      compatibility(context, {
+        code: "V2_SEGMENTATION_LABEL_STATE_CONFLICT",
+        disposition: "block",
+        severity: "error",
+        path: `${filePath}.isLabeled`,
+        message:
+          "A V2 Segmentation file marked as unlabeled cannot contain contour labels.",
+        details: { labelCount: labels.length },
+      });
+    }
+
+    const resolvedClassIndexes = labels
+      .map((label) => label.classIndex)
+      .filter((value): value is number => value !== undefined);
+    const containsNormalLabel =
+      normalClassIndex !== undefined &&
+      resolvedClassIndexes.includes(normalClassIndex);
+    const fileUsesNormalClass =
+      normalClassIndex !== undefined && fileClassIndex === normalClassIndex;
+    if (containsNormalLabel || fileUsesNormalClass) {
+      compatibility(context, {
+        code: "V2_SEGMENTATION_NORMAL_CLASS_CONTOUR_CONFLICT",
+        disposition: "block",
+        severity: "error",
+        path: `${filePath}.labelDataList`,
+        message:
+          "The structural OK class represents a normal image and cannot carry a defect contour.",
+      });
+    }
+
+    return false;
+  }
+
+  if (isLabeled === false) {
+    if (fileClassIndex !== undefined) {
+      compatibility(context, {
+        code: "V2_SEGMENTATION_UNLABELED_CLASS_CONFLICT",
+        disposition: "block",
+        severity: "error",
+        path: filePath,
+        message:
+          "An explicitly unlabeled Segmentation file cannot retain a file-level class assignment.",
+        details: { fileClassIndex },
+      });
+    }
+    return undefined;
+  }
+  if (
+    isLabeled === true &&
+    normalClassIndex !== undefined &&
+    fileClassIndex === normalClassIndex
+  ) {
+    return true;
+  }
+  if (fileRaw.isLabeled !== undefined && isLabeled === undefined) {
+    return undefined;
+  }
+
+  compatibility(context, {
+    code: "V2_SEGMENTATION_EMPTY_LABEL_STATE_AMBIGUOUS",
+    disposition: "block",
+    severity: "error",
+    path: `${filePath}.labelDataList`,
+    message:
+      "An empty Segmentation label list is only unambiguous when isLabeled=false (unlabeled) or isLabeled=true with the structural OK class (normal).",
+    details: {
+      isLabeled: isLabeled ?? null,
+      fileClassIndex: fileClassIndex ?? null,
+      normalClassIndex: normalClassIndex ?? null,
+    },
+  });
+  return undefined;
+}
+
 function inferLabelKind(projectType: ProjectType, raw: JsonObject): LabelKind {
   if (projectType === "detection") {
     return hasBoxFields(raw) ? "box" : "unknown";
@@ -1445,18 +1612,38 @@ function parseLabelGeometry(
     }
     const contourValue = raw.labelContour ?? raw.labelPolygon;
     const contours = parseContours(context, contourValue, path);
-    if (contours.length > 1) {
+    const box = parseSegmentationBoundingBox(context, raw, contours, path);
+    const contourRoles = contours.map(inferContourRingRole);
+    const ambiguousRingIndexes = contourRoles.flatMap((role, index) =>
+      role === "unknown" ? [index] : [],
+    );
+    const leadingInnerRingIndexes: number[] = [];
+    let hasOuterRing = false;
+    for (const [index, role] of contourRoles.entries()) {
+      if (role === "outer") {
+        hasOuterRing = true;
+      } else if (role === "inner" && !hasOuterRing) {
+        leadingInnerRingIndexes.push(index);
+      }
+    }
+    if (ambiguousRingIndexes.length > 0 || leadingInnerRingIndexes.length > 0) {
       compatibility(context, {
-        code: "V2_MULTIRING_CONTOUR_UNSUPPORTED",
+        code: "V2_CONTOUR_RING_WINDING_AMBIGUOUS",
         disposition: "block",
         severity: "error",
-        path,
-        message: "Multiple contour rings or holes require a verified V1 mapping.",
-        details: { ringCount: contours.length },
+        path: `${path}.labelContour`,
+        message:
+          "V2 Segmentation rings require positive-area outer winding and negative-area inner winding, with each inner ring following an outer ring.",
+        details: {
+          ambiguousRingIndexes,
+          leadingInnerRingIndexes,
+        },
       });
     }
     return {
+      ...(box ? { box } : {}),
       ...(contours.length > 0 ? { contours } : {}),
+      ...(contourRoles.length > 0 ? { contourRoles } : {}),
       ...(optionalString(raw.labelBitmap) ? { bitmap: optionalString(raw.labelBitmap) } : {}),
     };
   }
@@ -1522,6 +1709,102 @@ function parseContours(
     return [];
   }
   return rings;
+}
+
+function validateContourSize(
+  context: ParseContext,
+  value: JsonValue | undefined,
+  labelPath: string,
+): void {
+  if (value === undefined) return;
+  const size = finiteNumber(value);
+  if (size === undefined || size < 0) {
+    invalid(
+      context,
+      `${labelPath}.contourSize`,
+      "V2_CONTOUR_SIZE_INVALID",
+      "contourSize must be a finite non-negative number when supplied.",
+    );
+  }
+}
+
+function inferContourRingRole(ring: readonly PointIR[]): ContourRingRole {
+  let doubledArea = 0;
+  for (const [index, point] of ring.entries()) {
+    const next = ring[(index + 1) % ring.length]!;
+    doubledArea += point.x * next.y - next.x * point.y;
+  }
+  if (!Number.isFinite(doubledArea) || doubledArea === 0) return "unknown";
+  return doubledArea > 0 ? "outer" : "inner";
+}
+
+function parseSegmentationBoundingBox(
+  context: ParseContext,
+  raw: JsonObject,
+  contours: readonly (readonly PointIR[])[],
+  path: string,
+): { x: number; y: number; width: number; height: number } | undefined {
+  if (!hasBoxFields(raw)) return undefined;
+  const x = finiteNumber(raw.labelPosX);
+  const y = finiteNumber(raw.labelPosY);
+  const width = positiveNumber(raw.labelWidth);
+  const height = positiveNumber(raw.labelHeight);
+  if (x === undefined || y === undefined || width === undefined || height === undefined) {
+    invalid(
+      context,
+      path,
+      "V2_SEGMENTATION_BOUNDS_INVALID",
+      "Segmentation bounding fields require finite x/y and positive width/height.",
+    );
+    return undefined;
+  }
+
+  if (contours.length > 0) {
+    let minimumX = Number.POSITIVE_INFINITY;
+    let minimumY = Number.POSITIVE_INFINITY;
+    let maximumX = Number.NEGATIVE_INFINITY;
+    let maximumY = Number.NEGATIVE_INFINITY;
+    for (const ring of contours) {
+      for (const point of ring) {
+        minimumX = Math.min(minimumX, point.x);
+        minimumY = Math.min(minimumY, point.y);
+        maximumX = Math.max(maximumX, point.x);
+        maximumY = Math.max(maximumY, point.y);
+      }
+    }
+    const expected = {
+      x: Math.round(minimumX),
+      y: Math.round(minimumY),
+      width: Math.round(maximumX - minimumX),
+      height: Math.round(maximumY - minimumY),
+    };
+    if (
+      x !== expected.x ||
+      y !== expected.y ||
+      width !== expected.width ||
+      height !== expected.height
+    ) {
+      compatibility(context, {
+        code: "V2_SEGMENTATION_BOUNDS_CONFLICT",
+        disposition: "block",
+        severity: "error",
+        path,
+        message:
+          "Segmentation bounding fields conflict with the native bounds derived from labelContour.",
+        details: {
+          actualX: x,
+          actualY: y,
+          actualWidth: width,
+          actualHeight: height,
+          expectedX: expected.x,
+          expectedY: expected.y,
+          expectedWidth: expected.width,
+          expectedHeight: expected.height,
+        },
+      });
+    }
+  }
+  return { x, y, width, height };
 }
 
 function normalizeRings(value: unknown): readonly (readonly PointIR[])[] | undefined {
@@ -1923,7 +2206,7 @@ function validateGeometryBounds(
         disposition: "block",
         severity: "error",
         path,
-        message: "A detection box falls outside the image bounds.",
+        message: "A label bounding box falls outside the image bounds.",
       });
     }
     const contours = label.geometry.contours;
@@ -2009,6 +2292,28 @@ function reportKnownLosses(
     path: "$.project.projectFiles[*].labelDataList[*].contourId",
     message: "V2 contourId values are retained as source data and regenerated after V1 conversion.",
   });
+  reportAggregatedFieldLoss(context, labelRaw, "contourSize", {
+    code: "V2_CONTOUR_SIZE_REBUILT",
+    disposition: "rebuild",
+    severity: "info",
+    path: "$.project.projectFiles[*].labelDataList[*].contourSize",
+    message:
+      "V2 contourSize values are retained as source data and rebuilt from contour geometry after conversion.",
+  });
+  const contourBoundsCount = files
+    .flatMap((file) => file.labels)
+    .filter((label) => label.kind === "contour" && hasBoxFields(label.raw)).length;
+  if (contourBoundsCount > 0) {
+    compatibility(context, {
+      code: "V2_SEGMENTATION_BOUNDS_REBUILT",
+      disposition: "rebuild",
+      severity: "info",
+      path: "$.project.projectFiles[*].labelDataList[*]",
+      message:
+        "Segmentation bounding fields are validated against labelContour and rebuilt after V1 conversion.",
+      details: { affectedEntityCount: contourBoundsCount },
+    });
+  }
   const datasetSplitRaw = datasets.flatMap((dataset) => {
     const splitSets = dataset.raw.splitSets;
     return Array.isArray(splitSets) ? splitSets.filter(isJsonObject) : [];

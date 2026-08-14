@@ -165,7 +165,7 @@ test("V1 parser enforces node, attribute, class, file, and UTF-8 path limits", (
     xmlText: segmentationXml,
   });
   assert.equal(contourResult.ok, true);
-  assert.ok(hasCode(contourResult, "V1_PROJECT_TYPE_UNSUPPORTED"));
+  assert.equal(hasCode(contourResult, "V1_PROJECT_TYPE_UNSUPPORTED"), false);
   assert.equal(
     hasCode(contourResult, "V1_XML_ATTRIBUTE_LIMIT_EXCEEDED"),
     false,

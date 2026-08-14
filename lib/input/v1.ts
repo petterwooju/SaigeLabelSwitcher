@@ -1,12 +1,15 @@
 import type {
   CompatibilityDisposition,
   CompatibilitySummary,
+  ContourRingRole,
   JsonObject,
   JsonValue,
+  PointIR,
   ProjectClassIR,
   ProjectDiagnostic,
   ProjectFileIR,
   ProjectIR,
+  ProjectLabelIR,
   ProjectParseResult,
   ProjectSplitIR,
   ProjectType,
@@ -21,6 +24,7 @@ import {
   projectDiagnosticsAreTruncated,
   PROJECT_TEXT_MAX_BYTES,
   V1_PROJECT_LIMITS,
+  V2_PROJECT_LIMITS,
 } from "../security/resourceLimits.ts";
 
 export interface V1SrprojInput {
@@ -41,6 +45,18 @@ interface ParseContext {
   readonly source: string;
   readonly diagnostics: ProjectDiagnostic[];
   readonly unknownNodes: JsonObject[];
+}
+
+interface SegmentationResourceUsage {
+  labelCount: number;
+  contourPointCount: number;
+}
+
+interface ParsedSegmentationLabelGroup {
+  readonly isNormal: boolean;
+  readonly declaredCount: number;
+  readonly labels: readonly ProjectLabelIR[];
+  readonly raw: JsonObject;
 }
 
 class XmlSyntaxError extends Error {
@@ -173,7 +189,7 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
   }
 
   const type = normalizeProjectType(rawType);
-  if (type !== "classification") {
+  if (type !== "classification" && type !== "segmentation") {
     compatibility(context, {
       code: "V1_PROJECT_TYPE_UNSUPPORTED",
       severity: "error",
@@ -399,16 +415,21 @@ function parseImages(
     return undefined;
   }
   const files: ProjectFileIR[] = [];
+  const segmentationUsage: SegmentationResourceUsage = {
+    labelCount: 0,
+    contourPointCount: 0,
+  };
 
   for (const [index, node] of imageNodes.entries()) {
     const imagePath = `${path}.Image[${index}]`;
+    const knownImageChildren = new Set(["Path", "Width", "Height", "SplitState"]);
+    if (projectType === "classification") {
+      knownImageChildren.add("ClassIndexOfLabel");
+    } else if (projectType === "segmentation") {
+      knownImageChildren.add("LabelGroup");
+    }
     reportUnknownAttributes(context, node, imagePath);
-    reportUnknownChildren(
-      context,
-      node,
-      new Set(["Path", "Width", "Height", "SplitState", "ClassIndexOfLabel"]),
-      imagePath,
-    );
+    reportUnknownChildren(context, node, knownImageChildren, imagePath);
 
     const sourcePath = requiredLeaf(context, node, "Path", `${imagePath}.Path`);
     const widthText = optionalLeaf(context, node, "Width", `${imagePath}.Width`);
@@ -463,10 +484,22 @@ function parseImages(
       }
     }
 
+    const segmentation =
+      projectType === "segmentation"
+        ? parseSegmentationLabelGroup(
+            context,
+            node,
+            classes,
+            imagePath,
+            segmentationUsage,
+          )
+        : undefined;
+
     if (!sourcePath || !rawSplit || !split) continue;
     if (projectType === "classification" && classificationClassIndex === undefined) {
       continue;
     }
+    if (projectType === "segmentation" && segmentation === undefined) continue;
 
     const normalizedPath = normalizeSlashes(sourcePath);
     const raw: Record<string, JsonValue> = {
@@ -477,6 +510,11 @@ function parseImages(
     if (height !== undefined) raw.height = height;
     if (classificationClassIndex !== undefined) {
       raw.classIndexOfLabel = classificationClassIndex;
+    }
+    if (segmentation !== undefined) {
+      raw.isNormal = segmentation.isNormal;
+      raw.declaredLabelCount = segmentation.declaredCount;
+      raw.labels = segmentation.labels.map((label) => label.raw);
     }
 
     const splits: readonly ProjectSplitIR[] = [
@@ -497,16 +535,23 @@ function parseImages(
       isLabeled:
         projectType === "classification"
           ? classificationClassIndex !== undefined
-          : undefined,
+          : projectType === "segmentation"
+            ? segmentation!.isNormal || segmentation!.labels.length > 0
+            : undefined,
+      ...(segmentation !== undefined
+        ? { isNormal: segmentation.isNormal }
+        : {}),
       ...(classificationClassIndex !== undefined
         ? { classificationClassIndex }
         : {}),
       splits,
       canonicalSplit: split,
       labels:
-        classificationClassIndex === undefined
-          ? []
-          : [
+        projectType === "segmentation"
+          ? segmentation!.labels
+          : classificationClassIndex === undefined
+            ? []
+            : [
               {
                 index: 0,
                 kind: "classification",
@@ -534,6 +579,437 @@ function parseImages(
   }
   if (files.length !== imageNodes.length) return undefined;
   return { files, declaredCount };
+}
+
+function parseSegmentationLabelGroup(
+  context: ParseContext,
+  image: XmlElement,
+  classes: readonly ProjectClassIR[],
+  imagePath: string,
+  usage: SegmentationResourceUsage,
+): ParsedSegmentationLabelGroup | undefined {
+  const path = `${imagePath}.LabelGroup`;
+  const group = requiredElement(context, image, "LabelGroup", path);
+  if (!group) return undefined;
+
+  reportUnknownAttributes(context, group, path);
+  reportUnknownChildren(
+    context,
+    group,
+    new Set(["IsNormal", "NumberOfLabels", "Label"]),
+    path,
+  );
+  const isNormalText = requiredLeaf(context, group, "IsNormal", `${path}.IsNormal`);
+  const countText = requiredLeaf(
+    context,
+    group,
+    "NumberOfLabels",
+    `${path}.NumberOfLabels`,
+  );
+  const isNormal = parseRequiredBoolean(
+    context,
+    isNormalText,
+    `${path}.IsNormal`,
+    "V1_IS_NORMAL_INVALID",
+  );
+  const declaredCount = parseNonNegativeInteger(
+    context,
+    countText,
+    `${path}.NumberOfLabels`,
+    "V1_LABEL_COUNT_INVALID",
+  );
+  const labelNodes = childElements(group, "Label");
+  usage.labelCount = saturatingResourceAdd(
+    usage.labelCount,
+    labelNodes.length,
+    V2_PROJECT_LIMITS.maxLabels,
+  );
+  if (
+    usage.labelCount > V2_PROJECT_LIMITS.maxLabels ||
+    labelNodes.length > V2_PROJECT_LIMITS.maxLabels ||
+    (declaredCount !== undefined && declaredCount > V2_PROJECT_LIMITS.maxLabels)
+  ) {
+    resourceLimit(
+      context,
+      `${path}.Label`,
+      "V1_LABEL_LIMIT_EXCEEDED",
+      `V1 segmentation label count must not exceed ${V2_PROJECT_LIMITS.maxLabels}.`,
+      {
+        declaredCount: declaredCount ?? null,
+        imageLabelCount: labelNodes.length,
+        projectLabelCount: usage.labelCount,
+        maxLabels: V2_PROJECT_LIMITS.maxLabels,
+      },
+    );
+    return undefined;
+  }
+  if (declaredCount !== undefined && declaredCount !== labelNodes.length) {
+    invalid(
+      context,
+      `${path}.NumberOfLabels`,
+      "V1_LABEL_COUNT_MISMATCH",
+      `NumberOfLabels declares ${declaredCount}, but ${labelNodes.length} <Label> elements were found.`,
+      { declaredCount, actualCount: labelNodes.length },
+    );
+  }
+  if (
+    isNormal === true &&
+    (declaredCount !== 0 || labelNodes.length !== 0)
+  ) {
+    invalid(
+      context,
+      path,
+      "V1_NORMAL_IMAGE_HAS_LABELS",
+      "A V1 image marked IsNormal=true must not contain segmentation labels.",
+      {
+        declaredCount: declaredCount ?? null,
+        actualCount: labelNodes.length,
+      },
+    );
+  }
+
+  const labels: ProjectLabelIR[] = [];
+  for (const [index, node] of labelNodes.entries()) {
+    const label = parseSegmentationLabel(
+      context,
+      node,
+      classes,
+      `${path}.Label[${index}]`,
+      index,
+      usage,
+    );
+    if (label) labels.push(label);
+  }
+
+  if (
+    isNormal === undefined ||
+    declaredCount === undefined ||
+    labels.length !== labelNodes.length
+  ) {
+    return undefined;
+  }
+  return {
+    isNormal,
+    declaredCount,
+    labels,
+    raw: {
+      isNormal,
+      declaredLabelCount: declaredCount,
+      labels: labels.map((label) => label.raw),
+    },
+  };
+}
+
+function parseSegmentationLabel(
+  context: ParseContext,
+  node: XmlElement,
+  classes: readonly ProjectClassIR[],
+  path: string,
+  index: number,
+  usage: SegmentationResourceUsage,
+): ProjectLabelIR | undefined {
+  reportUnknownAttributes(context, node, path);
+  reportUnknownChildren(
+    context,
+    node,
+    new Set(["ClassIndex", "Type", "ContourGroup"]),
+    path,
+  );
+  const classIndexText = requiredLeaf(
+    context,
+    node,
+    "ClassIndex",
+    `${path}.ClassIndex`,
+  );
+  const labelType = requiredLeaf(context, node, "Type", `${path}.Type`);
+  const contourGroup = requiredElement(
+    context,
+    node,
+    "ContourGroup",
+    `${path}.ContourGroup`,
+  );
+  const classIndex = parseNonNegativeInteger(
+    context,
+    classIndexText,
+    `${path}.ClassIndex`,
+    "V1_SEGMENTATION_CLASS_INDEX_INVALID",
+  );
+  if (classIndex !== undefined && classIndex >= classes.length) {
+    invalid(
+      context,
+      `${path}.ClassIndex`,
+      "V1_SEGMENTATION_CLASS_INDEX_OUT_OF_RANGE",
+      `ClassIndex ${classIndex} does not reference a declared class.`,
+      { classIndex, classCount: classes.length },
+    );
+  }
+  if (labelType !== undefined && labelType.toLocaleLowerCase("en-US") !== "contours") {
+    invalid(
+      context,
+      `${path}.Type`,
+      "V1_SEGMENTATION_LABEL_TYPE_INVALID",
+      "V1 segmentation labels must use <Type>Contours</Type>.",
+      { labelType },
+    );
+  }
+
+  const geometry = contourGroup
+    ? parseSegmentationContours(
+        context,
+        contourGroup,
+        `${path}.ContourGroup`,
+        usage,
+      )
+    : undefined;
+  if (
+    classIndex === undefined ||
+    classIndex >= classes.length ||
+    labelType === undefined ||
+    labelType.toLocaleLowerCase("en-US") !== "contours" ||
+    geometry === undefined
+  ) {
+    return undefined;
+  }
+
+  const raw: JsonObject = {
+    classIndex,
+    type: labelType,
+    contours: geometry.rawContours,
+  };
+  return {
+    index,
+    kind: "contour",
+    origin: "manual",
+    classIndex,
+    sourceClassName: classes[classIndex]!.name,
+    geometry: {
+      contours: geometry.contours,
+      contourRoles: geometry.contourRoles,
+    },
+    synthesized: false,
+    raw,
+  };
+}
+
+function parseSegmentationContours(
+  context: ParseContext,
+  group: XmlElement,
+  path: string,
+  usage: SegmentationResourceUsage,
+):
+  | {
+      readonly contours: readonly (readonly PointIR[])[];
+      readonly contourRoles: readonly ContourRingRole[];
+      readonly rawContours: readonly JsonObject[];
+    }
+  | undefined {
+  reportUnknownAttributes(context, group, path);
+  reportUnknownChildren(context, group, new Set(["Contour"]), path);
+  const contourNodes = childElements(group, "Contour");
+  if (contourNodes.length === 0) {
+    invalid(
+      context,
+      path,
+      "V1_CONTOUR_REQUIRED",
+      "A V1 segmentation label must contain at least one <Contour>.",
+    );
+    return undefined;
+  }
+
+  const contours: PointIR[][] = [];
+  const contourRoles: ContourRingRole[] = [];
+  const rawContours: JsonObject[] = [];
+  for (const [contourIndex, contourNode] of contourNodes.entries()) {
+    const contourPath = `${path}.Contour[${contourIndex}]`;
+    reportUnknownAttributesExcept(
+      context,
+      contourNode,
+      new Set(["Type"]),
+      contourPath,
+    );
+    reportUnknownChildren(context, contourNode, new Set(["Point"]), contourPath);
+    if (contourNode.textParts.join("").trim() !== "") {
+      invalid(
+        context,
+        contourPath,
+        "V1_CONTOUR_TEXT_INVALID",
+        "A V1 <Contour> may contain only <Point> elements.",
+      );
+    }
+
+    const rawRole = contourNode.attributes.get("Type");
+    const normalizedRole = rawRole?.trim().toLocaleLowerCase("en-US");
+    const role: ContourRingRole | undefined =
+      normalizedRole === "outer"
+        ? "outer"
+        : normalizedRole === "inner"
+          ? "inner"
+          : undefined;
+    if (!role) {
+      invalid(
+        context,
+        `${contourPath}.@Type`,
+        "V1_CONTOUR_TYPE_INVALID",
+        "V1 contour Type must be 'Outer' or 'Inner'.",
+        { contourType: rawRole ?? null },
+      );
+    }
+
+    const pointNodes = childElements(contourNode, "Point");
+    usage.contourPointCount = saturatingResourceAdd(
+      usage.contourPointCount,
+      pointNodes.length,
+      V2_PROJECT_LIMITS.maxContourPoints,
+    );
+    if (usage.contourPointCount > V2_PROJECT_LIMITS.maxContourPoints) {
+      resourceLimit(
+        context,
+        `${contourPath}.Point`,
+        "V1_CONTOUR_POINT_LIMIT_EXCEEDED",
+        `V1 contour point count must not exceed ${V2_PROJECT_LIMITS.maxContourPoints}.`,
+        {
+          projectPointCount: usage.contourPointCount,
+          maxContourPoints: V2_PROJECT_LIMITS.maxContourPoints,
+        },
+      );
+      return undefined;
+    }
+    if (pointNodes.length < 3) {
+      invalid(
+        context,
+        `${contourPath}.Point`,
+        "V1_CONTOUR_POINT_COUNT_INVALID",
+        "A V1 contour must contain at least three points.",
+        { pointCount: pointNodes.length },
+      );
+    }
+
+    const points: PointIR[] = [];
+    for (const [pointIndex, pointNode] of pointNodes.entries()) {
+      const point = parseSegmentationPoint(
+        context,
+        pointNode,
+        `${contourPath}.Point[${pointIndex}]`,
+      );
+      if (point) points.push(point);
+    }
+    if (!role || points.length !== pointNodes.length || points.length < 3) continue;
+    contours.push(points);
+    contourRoles.push(role);
+    rawContours.push({
+      type: rawRole!,
+      points: points.map(({ x, y }) => ({ x, y })),
+    });
+  }
+
+  if (contours.length !== contourNodes.length) return undefined;
+  if (!contourRoles.includes("outer")) {
+    invalid(
+      context,
+      path,
+      "V1_OUTER_CONTOUR_REQUIRED",
+      "A V1 segmentation label must contain at least one Outer contour.",
+    );
+    return undefined;
+  }
+  let hasOuter = false;
+  const leadingInnerIndex = contourRoles.findIndex((role) => {
+    if (role === "outer") {
+      hasOuter = true;
+      return false;
+    }
+    return !hasOuter;
+  });
+  if (leadingInnerIndex >= 0) {
+    invalid(
+      context,
+      `${path}.Contour[${leadingInnerIndex}]`,
+      "V1_INNER_CONTOUR_BEFORE_OUTER",
+      "Each V1 Inner contour must follow an Outer contour in the same label.",
+      { contourIndex: leadingInnerIndex },
+    );
+    return undefined;
+  }
+  return { contours, contourRoles, rawContours };
+}
+
+function parseSegmentationPoint(
+  context: ParseContext,
+  node: XmlElement,
+  path: string,
+): PointIR | undefined {
+  reportUnknownAttributesExcept(context, node, new Set(["X", "Y"]), path);
+  if (node.children.length > 0 || node.textParts.join("").trim() !== "") {
+    invalid(
+      context,
+      path,
+      "V1_POINT_CONTENT_INVALID",
+      "A V1 <Point> must not contain text or child elements.",
+    );
+  }
+  const rawX = node.attributes.get("X");
+  const rawY = node.attributes.get("Y");
+  if (rawX === undefined) {
+    invalid(context, `${path}.@X`, "V1_POINT_COORDINATE_MISSING", "Point X is required.");
+  }
+  if (rawY === undefined) {
+    invalid(context, `${path}.@Y`, "V1_POINT_COORDINATE_MISSING", "Point Y is required.");
+  }
+  const x =
+    rawX === undefined
+      ? undefined
+      : parseFiniteCoordinate(context, rawX, `${path}.@X`);
+  const y =
+    rawY === undefined
+      ? undefined
+      : parseFiniteCoordinate(context, rawY, `${path}.@Y`);
+  if (
+    node.children.length > 0 ||
+    node.textParts.join("").trim() !== "" ||
+    x === undefined ||
+    y === undefined
+  ) {
+    return undefined;
+  }
+  return { x, y };
+}
+
+function parseRequiredBoolean(
+  context: ParseContext,
+  value: string | undefined,
+  path: string,
+  code: string,
+): boolean | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLocaleLowerCase("en-US");
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  invalid(context, path, code, "Expected 'true' or 'false'.", { value });
+  return undefined;
+}
+
+function parseFiniteCoordinate(
+  context: ParseContext,
+  value: string | undefined,
+  path: string,
+): number | undefined {
+  if (
+    value === undefined ||
+    !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value.trim())
+  ) {
+    invalid(context, path, "V1_POINT_COORDINATE_INVALID", "Point coordinates must be finite numbers.");
+    return undefined;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number) || Math.abs(number) > Number.MAX_SAFE_INTEGER) {
+    invalid(context, path, "V1_POINT_COORDINATE_INVALID", "Point coordinate is outside the safe numeric range.");
+    return undefined;
+  }
+  return number;
+}
+
+function saturatingResourceAdd(current: number, addition: number, maximum: number): number {
+  return Math.min(maximum + 1, current + addition);
 }
 
 function normalizeProjectType(value: string): ProjectType {
@@ -821,7 +1297,17 @@ function reportUnknownAttributes(
   element: XmlElement,
   path: string,
 ): void {
+  reportUnknownAttributesExcept(context, element, new Set(), path);
+}
+
+function reportUnknownAttributesExcept(
+  context: ParseContext,
+  element: XmlElement,
+  known: ReadonlySet<string>,
+  path: string,
+): void {
   for (const [name, value] of element.attributes) {
+    if (known.has(name)) continue;
     if (projectDiagnosticsAreTruncated(context.diagnostics)) break;
     const attributePath = `${path}.@${name}`;
     const details: Record<string, JsonValue> = {

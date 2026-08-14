@@ -6,6 +6,8 @@ import type {
   ProjectDiagnostic,
   ProjectFileIR,
   ProjectIR,
+  ProjectLabelIR,
+  PointIR,
   SplitType,
 } from "../model/project.ts";
 import {
@@ -612,7 +614,10 @@ function validateSupportedProject(
     );
     return false;
   }
-  if (project.project.type !== "classification") {
+  if (
+    project.project.type !== "classification" &&
+    project.project.type !== "segmentation"
+  ) {
     block(
       diagnostics,
       "V2_WRITE_GOLDEN_REQUIRED",
@@ -677,7 +682,9 @@ function buildProjectJson(
   }
   return isV2Source(project)
     ? cloneV2JsonWithPaths(project, filePaths, diagnostics)
-    : buildClassificationJson(project, filePaths, diagnostics);
+    : project.project.type === "segmentation"
+      ? buildSegmentationJson(project, filePaths, diagnostics)
+      : buildClassificationJson(project, filePaths, diagnostics);
 }
 
 /** Preserve every parsed V2 field, changing only projectFiles[].filePath. */
@@ -731,7 +738,6 @@ function buildClassificationJson(
     );
     return undefined;
   }
-
   const timestamp = deterministicTimestamp(project);
   const projectId = deterministicProjectId(project);
   const datasetId = projectId + 1;
@@ -850,6 +856,386 @@ function buildClassificationJson(
     },
   };
   return root;
+}
+
+/** Build the native V2 2.7.8 polygon-segmentation schema from a V1 project. */
+function buildSegmentationJson(
+  project: ProjectIR,
+  filePaths: readonly string[],
+  diagnostics: ProjectDiagnostic[],
+): JsonObject | undefined {
+  const classes = [...project.classes].sort((left, right) => left.index - right.index);
+  const files = [...project.files].sort((left, right) => left.index - right.index);
+  if (!validateCanonicalIndexes(classes, files, diagnostics)) return undefined;
+  if (project.datasets.length > 1) {
+    block(
+      diagnostics,
+      "V2_WRITE_MULTIPLE_DATASETS_UNSUPPORTED",
+      "$.datasets",
+      "Strict V1-to-V2 segmentation output supports one generated dataset.",
+    );
+    return undefined;
+  }
+  if (classes.length + 1 > V2_PROJECT_LIMITS.maxClasses) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_CLASS_LIMIT_EXCEEDED",
+      "$.classes",
+      `Segmentation output adds one structural OK class and must not exceed ${V2_PROJECT_LIMITS.maxClasses} classes.`,
+    );
+    return undefined;
+  }
+  if (
+    classes.some(
+      (item) =>
+        item.name.trim().normalize("NFKC").toLocaleLowerCase("en-US") === "ok",
+    )
+  ) {
+    block(
+      diagnostics,
+      "V2_WRITE_SEGMENTATION_OK_CLASS_RESERVED",
+      "$.classes",
+      "The class name 'OK' is reserved for V2 Segmentation normal images.",
+    );
+    return undefined;
+  }
+
+  const timestamp = deterministicTimestamp(project);
+  const projectId = deterministicProjectId(project);
+  const datasetId = projectId + 1;
+  const splitId = projectId + 2;
+  const datasetName =
+    project.datasets[0]?.name.trim() || project.project.name.trim() || "dataset";
+  const classByIndex = new Map(classes.map((item) => [item.index, item]));
+  const classInfos: MutableJsonObject[] = [
+    {
+      classId: 0,
+      className: "OK",
+      classNo: 0,
+      description: "",
+      classColor: "#1DDB16",
+      isNg: false,
+    },
+    ...classes.map((item) => ({
+      classId: projectId + 10 + item.index,
+      className: item.name,
+      classNo: item.index + 1,
+      description: item.description,
+      classColor: normalizedClassColor(item, item.index),
+      isNg: item.isNg ?? true,
+    })),
+  ];
+
+  let nextLabelId = projectId + 100_000;
+  const fileJson: MutableJsonObject[] = files.map((file, outputIndex) => {
+    const path = `$.files[${file.index}]`;
+    if (!isPositiveSafeInteger(file.width) || !isPositiveSafeInteger(file.height)) {
+      block(
+        diagnostics,
+        "V2_WRITE_IMAGE_DIMENSIONS_REQUIRED",
+        path,
+        "Strict segmentation output requires positive image width and height.",
+      );
+    }
+
+    if (file.isNormal === true && file.labels.length > 0) {
+      block(
+        diagnostics,
+        "V2_WRITE_SEGMENTATION_NORMAL_LABEL_CONFLICT",
+        path,
+        "A normal segmentation image cannot also contain defect contours.",
+      );
+    }
+    if (file.isLabeled === false && (file.isNormal === true || file.labels.length > 0)) {
+      block(
+        diagnostics,
+        "V2_WRITE_SEGMENTATION_STATE_CONFLICT",
+        `${path}.isLabeled`,
+        "An explicitly unlabeled segmentation image cannot contain a normal/defect label state.",
+      );
+    }
+    if (file.isLabeled === true && file.isNormal !== true && file.labels.length === 0) {
+      block(
+        diagnostics,
+        "V2_WRITE_SEGMENTATION_LABEL_REQUIRED",
+        `${path}.labels`,
+        "A labeled segmentation image must be normal or contain at least one contour label.",
+      );
+    }
+
+    const labels: MutableJsonObject[] = [];
+    for (const label of file.labels) {
+      const labelPath = `${path}.labels[${label.index}]`;
+      if (label.kind !== "contour") {
+        block(
+          diagnostics,
+          "V2_WRITE_SEGMENTATION_LABEL_KIND_UNSUPPORTED",
+          labelPath,
+          "Segmentation output accepts polygon contour labels only.",
+        );
+        continue;
+      }
+      const classIndex = label.classIndex;
+      const cls = classIndex === undefined ? undefined : classByIndex.get(classIndex);
+      if (!cls) {
+        block(
+          diagnostics,
+          "V2_WRITE_CLASS_REFERENCE_INVALID",
+          `${labelPath}.classIndex`,
+          "A segmentation contour references a missing class.",
+        );
+        continue;
+      }
+      const contour = normalizeSegmentationContours(
+        label,
+        file.width,
+        file.height,
+        diagnostics,
+        labelPath,
+      );
+      if (!contour) continue;
+      const labelId = nextLabelId;
+      nextLabelId += 1;
+      labels.push({
+        labelId,
+        labelType: "man",
+        labelPosX: contour.x,
+        labelPosY: contour.y,
+        labelWidth: contour.width,
+        labelHeight: contour.height,
+        labeledDate: timestamp,
+        labelContour: JSON.stringify(
+          contour.rings.map((ring) => ring.map((point) => [point.x, point.y])),
+        ),
+        contourSize: contour.area,
+        contourId: deterministicUuid(`${projectId}:label:${labelId}`),
+        className: cls.name,
+      });
+    }
+
+    const firstLabelClass = file.labels
+      .map((label) =>
+        label.classIndex === undefined ? undefined : classByIndex.get(label.classIndex),
+      )
+      .find((item): item is ProjectClassIR => item !== undefined);
+    const isNormal = file.isNormal === true;
+    const isLabeled = isNormal || labels.length > 0;
+    const splitType = v2SplitType(file.canonicalSplit, diagnostics, path);
+
+    return {
+      projectId,
+      fileId: projectId + 1_000 + outputIndex,
+      filePath: filePaths[file.index] ?? filePaths[outputIndex] ?? "",
+      isLabeled,
+      modifiedDate: timestamp,
+      assignedDate: timestamp,
+      datasetName,
+      ...(file.width !== undefined ? { width: file.width } : {}),
+      ...(file.height !== undefined ? { height: file.height } : {}),
+      ...(isNormal
+        ? { className: "OK" }
+        : firstLabelClass
+          ? { className: firstLabelClass.name }
+          : {}),
+      labelDataList: labels,
+      metadata: [{}, {}, {}],
+      registeredDate: timestamp,
+      splitSets: [{ splitId, splitName: "srproj", splitType }],
+    };
+  });
+
+  if (hasBlockingDiagnostic(diagnostics)) return undefined;
+  return {
+    project: {
+      projectId,
+      projectName: project.project.name,
+      projectType: "seg",
+      description: project.project.description,
+      roiMode: "no",
+      modifiedDate: timestamp,
+      createdDate: timestamp,
+      metadataList: [],
+      classInfos,
+      datasets: [
+        {
+          datasetId,
+          datasetName,
+          description: project.datasets[0]?.description ?? "",
+          modifiedDate: timestamp,
+          createdDate: timestamp,
+          createdBy: "admin",
+          projects: [],
+          metadataList: [],
+          splitSets: [{ splitId, splitName: "srproj", createdDate: timestamp }],
+        },
+      ],
+      projectFiles: fileJson,
+    },
+  };
+}
+
+interface NormalizedSegmentationContour {
+  readonly rings: readonly (readonly PointIR[])[];
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly area: number;
+}
+
+function normalizeSegmentationContours(
+  label: ProjectLabelIR,
+  imageWidth: number | undefined,
+  imageHeight: number | undefined,
+  diagnostics: ProjectDiagnostic[],
+  path: string,
+): NormalizedSegmentationContour | undefined {
+  if (label.geometry.bitmap) {
+    block(
+      diagnostics,
+      "V2_WRITE_SEGMENTATION_BITMAP_UNSUPPORTED",
+      `${path}.geometry.bitmap`,
+      "Bitmap masks cannot be converted by the verified polygon writer.",
+    );
+    return undefined;
+  }
+  const contours = label.geometry.contours;
+  const roles = label.geometry.contourRoles;
+  if (!contours?.length) {
+    block(
+      diagnostics,
+      "V2_WRITE_SEGMENTATION_CONTOUR_REQUIRED",
+      `${path}.geometry.contours`,
+      "A segmentation label requires at least one polygon ring.",
+    );
+    return undefined;
+  }
+  if (!roles || roles.length !== contours.length || roles.includes("unknown")) {
+    block(
+      diagnostics,
+      "V2_WRITE_SEGMENTATION_RING_ROLE_REQUIRED",
+      `${path}.geometry.contourRoles`,
+      "Every segmentation ring must be identified as outer or inner.",
+    );
+    return undefined;
+  }
+  if (!roles.includes("outer")) {
+    block(
+      diagnostics,
+      "V2_WRITE_SEGMENTATION_OUTER_RING_REQUIRED",
+      `${path}.geometry.contourRoles`,
+      "A segmentation label requires at least one outer ring.",
+    );
+    return undefined;
+  }
+  let hasOuter = false;
+  const leadingInnerIndex = roles.findIndex((role) => {
+    if (role === "outer") {
+      hasOuter = true;
+      return false;
+    }
+    return !hasOuter;
+  });
+  if (leadingInnerIndex >= 0) {
+    block(
+      diagnostics,
+      "V2_WRITE_SEGMENTATION_RING_ORDER_INVALID",
+      `${path}.geometry.contourRoles[${leadingInnerIndex}]`,
+      "Each inner contour must follow an outer contour in the same label.",
+    );
+    return undefined;
+  }
+
+  let minimumX = Number.POSITIVE_INFINITY;
+  let minimumY = Number.POSITIVE_INFINITY;
+  let maximumX = Number.NEGATIVE_INFINITY;
+  let maximumY = Number.NEGATIVE_INFINITY;
+  let signedCompositeArea = 0;
+  const rings: PointIR[][] = [];
+
+  contours.forEach((sourceRing, ringIndex) => {
+    const role = roles[ringIndex]!;
+    if (sourceRing.length < 3) {
+      block(
+        diagnostics,
+        "V2_WRITE_SEGMENTATION_CONTOUR_INVALID",
+        `${path}.geometry.contours[${ringIndex}]`,
+        "A polygon ring requires at least three points.",
+      );
+      return;
+    }
+    const ring = sourceRing.map((point) => ({ x: point.x, y: point.y }));
+    if (
+      ring.some(
+        (point) =>
+          !Number.isFinite(point.x) ||
+          !Number.isFinite(point.y) ||
+          (imageWidth !== undefined && (point.x < 0 || point.x > imageWidth)) ||
+          (imageHeight !== undefined && (point.y < 0 || point.y > imageHeight)),
+      )
+    ) {
+      block(
+        diagnostics,
+        "V2_WRITE_SEGMENTATION_POINT_INVALID",
+        `${path}.geometry.contours[${ringIndex}]`,
+        "Segmentation points must be finite and inside the image bounds.",
+      );
+      return;
+    }
+    let area = signedRingArea(ring);
+    if (!Number.isFinite(area) || area === 0) {
+      block(
+        diagnostics,
+        "V2_WRITE_SEGMENTATION_CONTOUR_AREA_INVALID",
+        `${path}.geometry.contours[${ringIndex}]`,
+        "A segmentation ring must have non-zero finite area.",
+      );
+      return;
+    }
+    const wantsPositiveArea = role === "outer";
+    if ((area > 0) !== wantsPositiveArea) {
+      ring.reverse();
+      area = -area;
+    }
+    signedCompositeArea += area;
+    for (const point of ring) {
+      minimumX = Math.min(minimumX, point.x);
+      minimumY = Math.min(minimumY, point.y);
+      maximumX = Math.max(maximumX, point.x);
+      maximumY = Math.max(maximumY, point.y);
+    }
+    rings.push(ring);
+  });
+
+  if (hasBlockingDiagnostic(diagnostics) || rings.length !== contours.length) {
+    return undefined;
+  }
+  const x = Math.round(minimumX);
+  const y = Math.round(minimumY);
+  const width = Math.round(maximumX - minimumX);
+  const height = Math.round(maximumY - minimumY);
+  // Polygon shoelace area is exact to half a pixel for integer V1 points;
+  // preserve that precision because native V2 exports do as well.
+  const area = Math.abs(signedCompositeArea);
+  if (width <= 0 || height <= 0 || area <= 0) {
+    block(
+      diagnostics,
+      "V2_WRITE_SEGMENTATION_GEOMETRY_INVALID",
+      `${path}.geometry`,
+      "A segmentation label must have a positive bounding box and composite area.",
+    );
+    return undefined;
+  }
+  return { rings, x, y, width, height, area };
+}
+
+function signedRingArea(points: readonly PointIR[]): number {
+  let doubledArea = 0;
+  for (const [index, point] of points.entries()) {
+    const next = points[(index + 1) % points.length]!;
+    doubledArea += point.x * next.y - next.x * point.y;
+  }
+  return doubledArea / 2;
 }
 
 function validateCanonicalIndexes(

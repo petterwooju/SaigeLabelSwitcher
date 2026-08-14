@@ -2,7 +2,7 @@
 
 > 版本：0.3
 > 日期：2026-08-14
-> 状态：Classification MVP 已实现；Detection / Segmentation 等待 golden fixtures
+> 状态：Classification 与多边形 Segmentation 已实现；Detection 等待 golden fixtures
 
 ## 1. 产品结论
 
@@ -318,7 +318,7 @@ flowchart LR
 |---|---|---|---|
 | Classification | P0 | P0 | V1→V2→V1 round-trip；类别/每图标签/Split 一致 |
 | Detection | P1 | P1 | 矩形框、类别、空标注及边界坐标 round-trip |
-| Segmentation | P1 | P1 | contour 点序、坐标、空/多轮廓 round-trip |
+| Segmentation | 已开放 | 已开放 | V1 Outer/Inner、V2 winding、多轮廓/孔洞、正常/未标注状态与 Split round-trip |
 | ROD | 待 fixture | 默认阻断 | V1 是否有等价旋转框 schema 未确认 |
 | OCR / Anomaly / 其他 | 默认阻断 | 默认阻断 | 获得双向 golden fixtures 后单独启用 |
 
@@ -371,7 +371,7 @@ flowchart LR
 - 空路径、重复引用、缺图、同名歧义和图片尺寸不一致。
 - manifest/JSON 路径穿越、大小写冲突、ZIP 加密、CRC 损坏或 ZIP bomb。
 - V2 多 dataset、多重/冲突 split、自定义 metadata 或 V1 无法表达的标签类型。
-- ROD/OCR/复杂 contour 等目标版本无等价表示。
+- ROD/OCR、bitmap-only mask、退化或方向不明确的 contour 等目标版本无已验证等价表示。
 - 写入权限撤销、磁盘空间不足、浏览器内存不足或用户取消。
 - 超大文件在不支持流式保存的浏览器中阻止 Blob 回退并建议 Edge/Chrome。
 
@@ -409,7 +409,8 @@ flowchart LR
 
 ### 阶段 E：逐类扩展
 
-- Detection、Segmentation 分别取得双向 fixtures 后启用。
+- Segmentation 多边形已通过 V1 真实样本、V2 原生容器 golden 与双向生成 round-trip 后启用。
+- Detection 取得独立双向 fixtures 后启用。
 - ROD、OCR 和其他类型独立评估，不复用“看起来相似”的标注映射。
 
 ## 17. 开发开始条件

@@ -117,6 +117,9 @@ export interface PointIR {
   readonly y: number;
 }
 
+/** Semantic role of a polygon ring in a segmentation label. */
+export type ContourRingRole = "outer" | "inner" | "unknown";
+
 export interface BoxIR {
   readonly x: number;
   readonly y: number;
@@ -136,6 +139,8 @@ export interface LabelGeometryIR {
   readonly box?: BoxIR;
   /** Each item is a contour ring in source order. */
   readonly contours?: readonly (readonly PointIR[])[];
+  /** Ring roles parallel to `contours`; absent only for legacy/unknown inputs. */
+  readonly contourRoles?: readonly ContourRingRole[];
   readonly rotatedBox?: RotatedBoxIR;
   readonly bitmap?: string;
   readonly text?: string;
@@ -188,6 +193,8 @@ export interface ProjectFileIR {
   readonly width?: number;
   readonly height?: number;
   readonly isLabeled?: boolean;
+  /** V1 segmentation explicitly distinguishes normal images from defects. */
+  readonly isNormal?: boolean;
   readonly datasetName?: string;
   readonly datasetIndex?: number;
   readonly classificationClassIndex?: number;

@@ -4,7 +4,7 @@ SaigeVision V1 / V2 项目文件的纯浏览器双向转换 Webapp。项目、�
 
 ## 当前支持
 
-已开放并经过真实样本与 round-trip 测试的项目类型：`Classification`。
+已开放并经过真实样本与 round-trip 测试的项目类型：`Classification`、多边形 `Segmentation`（含多轮廓与孔洞）。
 
 | 输入 | 可用输出 |
 |---|---|
@@ -15,15 +15,15 @@ SaigeVision V1 / V2 项目文件的纯浏览器双向转换 Webapp。项目、�
 
 `.visionproj` 与 SVPA ZIP 包含图片；`.subvisionproj` 与 `.srproj` 不包含图片。需要图片而源文件不带图时，页面会要求用户补充图片，并在 100% 唯一匹配后启用转换。
 
-Classification MVP 当前验证的图片格式为 PNG、JPEG、BMP、GIF 和 WebP。转换完整项目时会逐张校验格式、宽高和项目声明是否一致；不匹配时阻止写出。
+当前验证的图片格式为 PNG、JPEG、BMP、GIF 和 WebP。转换完整项目时会逐张校验格式、宽高和项目声明是否一致；不匹配时阻止写出。
 
 - 桌面版 Edge / Chrome：优先选择一个或多个图片目录。
 - 不支持目录读取的内置浏览器：可选择保留原目录结构的图片 ZIP（包括本工具导出的 SVPA ZIP）。ZIP 图片按需读取，不会整包上传或一次性解压到内存。
 - 直接多选图片文件只适用于文件名全局唯一的项目；存在 `000.png` 等同名图片时会主动阻断，避免把错误图片写入项目。
 
-V1 的训练参数和数据增强参数目前没有经过验证的 V2 对应字段，因此不会写入 V2 项目；图片、类别、分类标签和 Training / Validation 划分不受影响。导入 V2 后请重新确认训练设置。`MaskingParameter = Not set` 会作为“未启用遮罩”处理，不再显示为兼容性警告。
+V1 的训练参数和数据增强参数目前没有经过验证的 V2 对应字段，因此不会写入 V2 项目；图片、类别、标注几何和 Training / Validation 划分不受影响。导入 V2 后请重新确认训练设置。`MaskingParameter = Not set` 会作为“未启用遮罩”处理，不再显示为兼容性警告。
 
-Detection、Segmentation、ROD、OCR 等类型会明确阻断，不会“尽力转换”或静默丢弃标注。
+Segmentation 当前支持 V1 `Contours` 与 V2 `labelContour` 多边形，按环方向保留 `Outer/Inner` 与孔洞；bitmap-only mask、退化/方向不明确的环会明确阻断。Detection、ROD、OCR 等尚未验证类型仍会明确阻断，不会“尽力转换”或静默丢弃标注。
 
 ## 本地运行
 

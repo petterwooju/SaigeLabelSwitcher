@@ -20,6 +20,7 @@ import {
   type ImageMatchIssue,
   type ImageMatchSummary,
 } from "./ConverterShell";
+import { allowedOutputs } from "./projectCapabilities.ts";
 import {
   openValidatedZip,
   type OpenArchive,
@@ -93,7 +94,7 @@ const uiCopy = {
     multiple: "一次只能转换一个项目文件。",
     blocked: "该项目包含目标版本无法安全表示的内容，因此没有生成文件。",
     invalid: "项目文件已损坏或内容不完整，无法安全读取。",
-    unsupported: "当前仅开放经过真实样本验证的 Classification 项目转换。",
+    unsupported: "该项目类型当前没有经过真实样本验证的安全转换路径。",
     emptyProject: "项目中没有图片，当前没有可安全生成的目标格式。",
     detection: "检测 (Detection)",
     segmentation: "分割 (Segmentation)",
@@ -106,7 +107,7 @@ const uiCopy = {
     directoryFileLimit: `所选目录包含超过 ${DEFAULT_DIRECTORY_MAX_FILES.toLocaleString("zh-CN")} 个候选图片。`,
     directorySizeLimit: `所选目录候选图片总大小超过 ${formatLimitBytes(DEFAULT_DIRECTORY_MAX_TOTAL_BYTES)}。`,
     imageFilesNeedPaths: "该项目含有同名图片，直接多选文件会丢失所属目录，无法安全匹配。请改用图片 ZIP，或在桌面版 Edge/Chrome 中选择目录。",
-    imageZipEmpty: "所选 ZIP 中没有找到受支持的图片。请保留类别文件夹结构后重新压缩。",
+    imageZipEmpty: "所选 ZIP 中没有找到受支持的图片。请保留原图片目录结构后重新压缩。",
     trainingSettingsNotMapped: "V1 的训练参数和数据增强设置不会写入 V2；图片、类别、标注及训练/验证划分不受影响。导入后请在 V2 中重新确认训练设置。",
     unmappedSourceField: "这个 V1 设置没有经过验证的 V2 对应字段，转换时不会写入目标项目。",
     diagnosticTimestampLoss: "目标格式不会保留源项目中的部分时间戳或内部标识字段。",
@@ -135,7 +136,7 @@ const uiCopy = {
     multiple: "Choose exactly one project file at a time.",
     blocked: "The project contains data that cannot be represented safely in the target version.",
     invalid: "The project file is damaged or incomplete and could not be read safely.",
-    unsupported: "Only Classification projects verified against real samples are enabled for now.",
+    unsupported: "No safe conversion path for this project type has been verified against real samples yet.",
     emptyProject: "The project contains no images, so no target format can be created safely.",
     detection: "Detection",
     segmentation: "Segmentation",
@@ -148,7 +149,7 @@ const uiCopy = {
     directoryFileLimit: `The selected folder contains more than ${DEFAULT_DIRECTORY_MAX_FILES.toLocaleString("en-US")} candidate images.`,
     directorySizeLimit: `The candidate images in the selected folder exceed ${formatLimitBytes(DEFAULT_DIRECTORY_MAX_TOTAL_BYTES)}.`,
     imageFilesNeedPaths: "This project contains duplicate image filenames. Direct file selection loses their folders and cannot be matched safely. Choose an image ZIP, or select the folder in desktop Edge/Chrome.",
-    imageZipEmpty: "No supported images were found in the selected ZIP. Preserve the class folder structure and create the ZIP again.",
+    imageZipEmpty: "No supported images were found in the selected ZIP. Preserve the original image folder structure and create the ZIP again.",
     trainingSettingsNotMapped: "V1 training and augmentation settings will not be written to V2. Images, classes, labels, and the training/validation split are unaffected. Review the training settings in V2 after import.",
     unmappedSourceField: "This V1 setting has no verified V2 equivalent and will not be written to the target project.",
     diagnosticTimestampLoss: "The target format does not preserve some source timestamps or internal identifiers.",
@@ -177,7 +178,7 @@ const uiCopy = {
     multiple: "프로젝트 파일을 한 번에 하나만 선택하세요.",
     blocked: "대상 버전에서 안전하게 표현할 수 없는 데이터가 포함되어 있습니다.",
     invalid: "프로젝트 파일이 손상되었거나 불완전하여 안전하게 읽을 수 없습니다.",
-    unsupported: "현재는 실제 샘플로 검증된 Classification 프로젝트만 지원합니다.",
+    unsupported: "이 프로젝트 유형에는 실제 샘플로 검증된 안전한 변환 경로가 아직 없습니다.",
     emptyProject: "프로젝트에 이미지가 없어 안전하게 만들 수 있는 대상 형식이 없습니다.",
     detection: "검출 (Detection)",
     segmentation: "분할 (Segmentation)",
@@ -190,7 +191,7 @@ const uiCopy = {
     directoryFileLimit: `선택한 폴더에 후보 이미지가 ${DEFAULT_DIRECTORY_MAX_FILES.toLocaleString("ko-KR")}개보다 많습니다.`,
     directorySizeLimit: `선택한 폴더의 후보 이미지 총크기가 ${formatLimitBytes(DEFAULT_DIRECTORY_MAX_TOTAL_BYTES)}를 초과합니다.`,
     imageFilesNeedPaths: "이 프로젝트에는 이름이 같은 이미지가 있습니다. 파일 직접 선택은 폴더 정보를 잃어 안전하게 일치시킬 수 없습니다. 이미지 ZIP을 선택하거나 데스크톱 Edge/Chrome에서 폴더를 선택하세요.",
-    imageZipEmpty: "선택한 ZIP에서 지원되는 이미지를 찾지 못했습니다. 클래스 폴더 구조를 유지하여 다시 압축하세요.",
+    imageZipEmpty: "선택한 ZIP에서 지원되는 이미지를 찾지 못했습니다. 원본 이미지 폴더 구조를 유지하여 다시 압축하세요.",
     trainingSettingsNotMapped: "V1 학습 및 데이터 증강 설정은 V2에 기록되지 않습니다. 이미지, 클래스, 라벨, 학습/검증 분할에는 영향이 없습니다. 가져온 뒤 V2에서 학습 설정을 다시 확인하세요.",
     unmappedSourceField: "이 V1 설정에는 검증된 V2 대응 필드가 없어 대상 프로젝트에 기록되지 않습니다.",
     diagnosticTimestampLoss: "대상 형식은 원본 프로젝트의 일부 타임스탬프 또는 내부 식별자를 보존하지 않습니다.",
@@ -333,7 +334,7 @@ export function ProjectConverter() {
 
   const project = loaded?.project;
   const outputFormats = useMemo(
-    () => (project ? allowedOutputs(loaded.format) : []),
+    () => (project ? allowedOutputs(loaded.format, project.project.type) : []),
     [loaded, project],
   );
   const requiresImages = target === "visionproj" || target === "svpa-zip";
@@ -367,7 +368,7 @@ export function ProjectConverter() {
   );
   const projectUnsupported = Boolean(
     status === "unsupported" ||
-      (project && (project.project.type !== "classification" || project.files.length === 0)),
+      (project && (outputFormats.length === 0 || project.files.length === 0)),
   );
   const imagesReady = !needsImageAccess || embeddedImages || Boolean(matchReport?.canPackage);
   const canSave = Boolean(
@@ -493,7 +494,8 @@ export function ProjectConverter() {
           return;
         }
         const emptyProject = next.project.files.length === 0;
-        if (next.project.project.type !== "classification" || emptyProject) {
+        const formats = allowedOutputs(next.format, next.project.project.type);
+        if (formats.length === 0 || emptyProject) {
           setRuntimeDiagnostics([{
             severity: "error",
             code: emptyProject ? "PROJECT_EMPTY" : "PROJECT_UNSUPPORTED",
@@ -501,7 +503,6 @@ export function ProjectConverter() {
           setStatus("unsupported");
           return;
         }
-        const formats = allowedOutputs(next.format);
         setTarget(formats[0] ?? null);
         setStatus("ready");
       } catch (error) {
@@ -1178,15 +1179,6 @@ export function ProjectConverter() {
       />
     </>
   );
-}
-
-function allowedOutputs(format: ProjectSourceFormat): readonly ConverterOutputFormat[] {
-  switch (format) {
-    case "v1-srproj": return ["visionproj", "subvisionproj", "svpa-zip"];
-    case "v1-svpa": return ["visionproj", "subvisionproj"];
-    case "v2-visionproj": return ["svpa-zip"];
-    case "v2-subvisionproj": return ["svpa-zip", "srproj"];
-  }
 }
 
 function guessedFormat(fileName: string): ProjectSourceFormat {

@@ -433,18 +433,16 @@ test("unknown project types are blocked explicitly", () => {
   );
 });
 
-test("DET and SEG output remain blocked without verified goldens", () => {
-  for (const type of ["detection", "segmentation"] as const) {
-    const source = v1ClassificationProject();
-    const result = writeV2VisionProject({
-      ...source,
-      project: { ...source.project, type, rawType: type },
-    });
-    assert.equal(result.ok, false);
-    assert.ok(
-      result.diagnostics.some((item) => item.code === "V2_WRITE_GOLDEN_REQUIRED"),
-    );
-  }
+test("DET output remains blocked without a verified golden", () => {
+  const source = v1ClassificationProject();
+  const result = writeV2VisionProject({
+    ...source,
+    project: { ...source.project, type: "detection", rawType: "detection" },
+  });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((item) => item.code === "V2_WRITE_GOLDEN_REQUIRED"),
+  );
 });
 
 test("V2 writers enforce parser compatibility unless loss was confirmed", () => {

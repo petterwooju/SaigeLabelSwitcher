@@ -1,8 +1,11 @@
 import type {
+  ContourRingRole,
   JsonObject,
+  PointIR,
   ProjectClassIR,
   ProjectFileIR,
   ProjectIR,
+  ProjectLabelIR,
   SplitType,
 } from "../model/project.ts";
 
@@ -35,7 +38,8 @@ export class SrprojWriteError extends Error {
 }
 
 /**
- * Serialize the Classification subset of ProjectIR as deterministic V1 XML.
+ * Serialize a verified Classification or polygon Segmentation ProjectIR as
+ * deterministic V1 XML.
  * User-controlled values are always emitted as escaped XML text nodes.
  */
 export function writeSrproj(
@@ -43,16 +47,25 @@ export function writeSrproj(
   options: SrprojWriteOptions = {},
 ): string {
   assertWriterCompatibility(project, "v1", options.allowConfirmedLoss ?? false);
-  if (project.project.type !== "classification") {
+  if (
+    project.project.type !== "classification" &&
+    project.project.type !== "segmentation"
+  ) {
     throw new SrprojWriteError(
       "SRPROJ_PROJECT_TYPE_UNSUPPORTED",
       "$.project.type",
-      `Only Classification has a verified V1 writer; received '${project.project.rawType}'.`,
+      `Only Classification and polygon Segmentation have verified V1 writers; received '${project.project.rawType}'.`,
     );
   }
 
   const lineEnding = options.lineEnding ?? "\n";
-  const classes = orderAndValidateClasses(project.classes);
+  const structuralOkClassIndex =
+    project.project.type === "segmentation"
+      ? structuralSegmentationOkClassIndex(project)
+      : undefined;
+  const classes = orderAndValidateClasses(
+    project.classes.filter((item) => item.index !== structuralOkClassIndex),
+  );
   const files = orderAndValidateFiles(project.files);
   const outputClassIndex = new Map<number, number>();
   classes.forEach((item, index) => outputClassIndex.set(item.index, index));
@@ -61,7 +74,7 @@ export function writeSrproj(
     '<?xml version="1.0" encoding="utf-8"?>',
     "<Project>",
     `  <Version>${escapeXmlText(options.version ?? "0.9", "$.Version")}</Version>`,
-    "  <Type>Classification</Type>",
+    `  <Type>${project.project.type === "segmentation" ? "Segmentation" : "Classification"}</Type>`,
   ];
 
   const modifiedDate =
@@ -92,16 +105,6 @@ export function writeSrproj(
     const path = `$.files[${outputIndex}]`;
     const sourcePath = resolveOutputPath(file, outputIndex, options);
     const split = splitToV1(file.canonicalSplit, `${path}.canonicalSplit`);
-    const sourceClassIndex = resolveClassificationClassIndex(file, path);
-    const classIndex = outputClassIndex.get(sourceClassIndex);
-    if (classIndex === undefined) {
-      throw new SrprojWriteError(
-        "SRPROJ_CLASS_REFERENCE_INVALID",
-        `${path}.classificationClassIndex`,
-        `Classification label references missing canonical class index ${sourceClassIndex}.`,
-      );
-    }
-
     lines.push(
       "    <Image>",
       `      <Path>${escapeXmlText(sourcePath, `${path}.sourcePath`)}</Path>`,
@@ -112,15 +115,260 @@ export function writeSrproj(
     if (file.height !== undefined) {
       lines.push(`      <Height>${positiveInteger(file.height, `${path}.height`)}</Height>`);
     }
-    lines.push(
-      `      <SplitState>${split}</SplitState>`,
-      `      <ClassIndexOfLabel>${classIndex}</ClassIndexOfLabel>`,
-      "    </Image>",
-    );
+    lines.push(`      <SplitState>${split}</SplitState>`);
+    if (project.project.type === "classification") {
+      const sourceClassIndex = resolveClassificationClassIndex(file, path);
+      const classIndex = outputClassIndex.get(sourceClassIndex);
+      if (classIndex === undefined) {
+        throw new SrprojWriteError(
+          "SRPROJ_CLASS_REFERENCE_INVALID",
+          `${path}.classificationClassIndex`,
+          `Classification label references missing canonical class index ${sourceClassIndex}.`,
+        );
+      }
+      lines.push(`      <ClassIndexOfLabel>${classIndex}</ClassIndexOfLabel>`);
+    } else {
+      appendSegmentationLabelGroup(
+        lines,
+        file,
+        path,
+        outputClassIndex,
+        structuralOkClassIndex,
+      );
+    }
+    lines.push("    </Image>");
   }
 
   lines.push("  </ImageGroup>", "</Project>", "");
   return lines.join(lineEnding);
+}
+
+function structuralSegmentationOkClassIndex(project: ProjectIR): number | undefined {
+  if (
+    project.source.format !== "v2-subvisionproj" &&
+    project.source.format !== "v2-visionproj"
+  ) {
+    return undefined;
+  }
+  const candidates = project.classes.filter((item) => {
+    const classNo = typeof item.raw.classNo === "number" ? item.raw.classNo : item.index;
+    return (
+      classNo === 0 &&
+      item.name.trim().normalize("NFKC").toLocaleLowerCase("en-US") === "ok" &&
+      item.isNg === false
+    );
+  });
+  const defectClassesAreExplicit = project.classes.every(
+    (item) => candidates.includes(item) || item.isNg === true,
+  );
+  return candidates.length === 1 && defectClassesAreExplicit
+    ? candidates[0]!.index
+    : undefined;
+}
+
+function appendSegmentationLabelGroup(
+  lines: string[],
+  file: ProjectFileIR,
+  path: string,
+  outputClassIndex: ReadonlyMap<number, number>,
+  structuralOkClassIndex: number | undefined,
+): void {
+  const labels = [...file.labels].sort((left, right) => left.index - right.index);
+  if (labels.some((label) => label.kind !== "contour")) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_LABEL_KIND_UNSUPPORTED",
+      `${path}.labels`,
+      "V1 Segmentation accepts polygon contour labels only.",
+    );
+  }
+  const inferredNormal = inferSegmentationNormal(file, structuralOkClassIndex);
+  if (inferredNormal && labels.length > 0) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_NORMAL_LABEL_CONFLICT",
+      path,
+      "A normal segmentation image cannot also contain defect contours.",
+    );
+  }
+  if (file.isLabeled === false && (inferredNormal || labels.length > 0)) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_STATE_CONFLICT",
+      `${path}.isLabeled`,
+      "An explicitly unlabeled segmentation image cannot contain labels.",
+    );
+  }
+  if (file.isLabeled === true && !inferredNormal && labels.length === 0) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_LABEL_MISSING",
+      `${path}.labels`,
+      "A labeled segmentation image must be normal or contain a contour label.",
+    );
+  }
+
+  lines.push(
+    "      <LabelGroup>",
+    `        <IsNormal>${inferredNormal ? "true" : "false"}</IsNormal>`,
+    `        <NumberOfLabels>${labels.length}</NumberOfLabels>`,
+  );
+  for (const [labelPosition, label] of labels.entries()) {
+    appendSegmentationLabel(
+      lines,
+      label,
+      `${path}.labels[${labelPosition}]`,
+      outputClassIndex,
+      structuralOkClassIndex,
+    );
+  }
+  lines.push("      </LabelGroup>");
+}
+
+function inferSegmentationNormal(
+  file: ProjectFileIR,
+  structuralOkClassIndex: number | undefined,
+): boolean {
+  if (file.isNormal !== undefined) return file.isNormal;
+  if (file.labels.length > 0 || structuralOkClassIndex === undefined) return false;
+  const rawClassName =
+    typeof file.raw.className === "string"
+      ? file.raw.className.trim().toLocaleLowerCase("en-US")
+      : "";
+  return file.isLabeled === true && rawClassName === "ok";
+}
+
+function appendSegmentationLabel(
+  lines: string[],
+  label: ProjectLabelIR,
+  path: string,
+  outputClassIndex: ReadonlyMap<number, number>,
+  structuralOkClassIndex: number | undefined,
+): void {
+  if (label.geometry.bitmap) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_BITMAP_UNSUPPORTED",
+      `${path}.geometry.bitmap`,
+      "Bitmap masks cannot be represented by the verified V1 contour schema.",
+    );
+  }
+  if (label.classIndex === undefined || label.classIndex === structuralOkClassIndex) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_CLASS_REFERENCE_INVALID",
+      `${path}.classIndex`,
+      "A defect contour must reference a non-OK class.",
+    );
+  }
+  const classIndex = outputClassIndex.get(label.classIndex);
+  if (classIndex === undefined) {
+    throw new SrprojWriteError(
+      "SRPROJ_CLASS_REFERENCE_INVALID",
+      `${path}.classIndex`,
+      `Segmentation label references missing canonical class index ${label.classIndex}.`,
+    );
+  }
+  const contours = label.geometry.contours;
+  const roles = label.geometry.contourRoles;
+  if (!contours?.length) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_CONTOUR_MISSING",
+      `${path}.geometry.contours`,
+      "A segmentation label requires at least one contour ring.",
+    );
+  }
+  if (!roles || roles.length !== contours.length || roles.includes("unknown")) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_RING_ROLE_REQUIRED",
+      `${path}.geometry.contourRoles`,
+      "Every contour ring must be identified as outer or inner.",
+    );
+  }
+  if (!roles.includes("outer")) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_OUTER_RING_REQUIRED",
+      `${path}.geometry.contourRoles`,
+      "A segmentation label requires at least one outer ring.",
+    );
+  }
+  let hasOuter = false;
+  const leadingInnerIndex = roles.findIndex((role) => {
+    if (role === "outer") {
+      hasOuter = true;
+      return false;
+    }
+    return !hasOuter;
+  });
+  if (leadingInnerIndex >= 0) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_RING_ORDER_INVALID",
+      `${path}.geometry.contourRoles[${leadingInnerIndex}]`,
+      "Each inner contour must follow an outer contour in the same label.",
+    );
+  }
+
+  lines.push(
+    "        <Label>",
+    `          <ClassIndex>${classIndex}</ClassIndex>`,
+    "          <Type>Contours</Type>",
+    "          <ContourGroup>",
+  );
+  contours.forEach((sourceRing, ringIndex) => {
+    const role = roles[ringIndex]!;
+    const ring = normalizeV1Ring(sourceRing, role, `${path}.geometry.contours[${ringIndex}]`);
+    lines.push(`            <Contour Type="${role === "outer" ? "Outer" : "Inner"}">`);
+    for (const point of ring) {
+      lines.push(
+        `              <Point X="${finiteXmlNumber(point.x, `${path}.geometry.contours[${ringIndex}].x`)}" Y="${finiteXmlNumber(point.y, `${path}.geometry.contours[${ringIndex}].y`)}" />`,
+      );
+    }
+    lines.push("            </Contour>");
+  });
+  lines.push("          </ContourGroup>", "        </Label>");
+}
+
+function normalizeV1Ring(
+  source: readonly PointIR[],
+  role: ContourRingRole,
+  path: string,
+): PointIR[] {
+  if (source.length < 3) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_CONTOUR_INVALID",
+      path,
+      "A contour ring requires at least three points.",
+    );
+  }
+  const ring = source.map((point) => ({ x: point.x, y: point.y }));
+  const area = signedRingArea(ring, path);
+  const wantsPositiveArea = role === "inner";
+  if ((area > 0) !== wantsPositiveArea) ring.reverse();
+  return ring;
+}
+
+function signedRingArea(points: readonly PointIR[], path: string): number {
+  let doubledArea = 0;
+  for (const [index, point] of points.entries()) {
+    finiteXmlNumber(point.x, `${path}[${index}].x`);
+    finiteXmlNumber(point.y, `${path}[${index}].y`);
+    const next = points[(index + 1) % points.length]!;
+    doubledArea += point.x * next.y - next.x * point.y;
+  }
+  const area = doubledArea / 2;
+  if (!Number.isFinite(area) || area === 0) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_CONTOUR_AREA_INVALID",
+      path,
+      "A contour ring must have non-zero finite area.",
+    );
+  }
+  return area;
+}
+
+function finiteXmlNumber(value: number, path: string): string {
+  if (!Number.isFinite(value)) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_POINT_INVALID",
+      path,
+      "Contour coordinates must be finite numbers.",
+    );
+  }
+  return Object.is(value, -0) ? "0" : String(value);
 }
 
 function assertWriterCompatibility(
