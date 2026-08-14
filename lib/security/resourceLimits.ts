@@ -1,4 +1,8 @@
-import type { ProjectDiagnostic } from "../model/project.ts";
+import type {
+  ProjectDiagnostic,
+  ProjectFileIR,
+  ProjectIR,
+} from "../model/project.ts";
 
 export const PROJECT_TEXT_MAX_BYTES = 16 * 1024 ** 2;
 export const MATERIALIZED_BINARY_MAX_BYTES = 64 * 1024 ** 2;
@@ -31,6 +35,31 @@ export const V2_PROJECT_LIMITS = Object.freeze({
   maxSplitMemberships: 250_000,
   maxContourPoints: 250_000,
 });
+
+/** Count canonical polygon points without allowing a hostile project to
+ * overflow the counter. A result above `maximum` is a blocking sentinel. */
+export function countProjectContourPoints(
+  project: ProjectIR,
+  maximum = V2_PROJECT_LIMITS.maxContourPoints,
+): number {
+  return countContourPointsInFiles(project.files, maximum);
+}
+
+export function countContourPointsInFiles(
+  files: readonly ProjectFileIR[],
+  maximum = V2_PROJECT_LIMITS.maxContourPoints,
+): number {
+  let total = 0;
+  for (const file of files) {
+    for (const label of file.labels) {
+      for (const ring of label.geometry?.contours ?? []) {
+        total = Math.min(maximum + 1, total + ring.length);
+        if (total > maximum) return total;
+      }
+    }
+  }
+  return total;
+}
 
 export const BROWSER_ARCHIVE_LIMITS = Object.freeze({
   maxEntries: 20_000,

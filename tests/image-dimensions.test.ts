@@ -376,21 +376,14 @@ test("returns structured issues for missing, duplicate, malformed, invalid, and 
   }
 });
 
-test("uses createImageBitmap only as an unknown-format fallback and closes it", async () => {
+test("rejects unknown image formats without invoking a bitmap fallback", async () => {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, "createImageBitmap");
   let calls = 0;
-  let closes = 0;
   Object.defineProperty(globalThis, "createImageBitmap", {
     configurable: true,
     value: async () => {
       calls += 1;
-      return {
-        width: 17,
-        height: 19,
-        close() {
-          closes += 1;
-        },
-      } as ImageBitmap;
+      throw new Error("bitmap fallback must not run");
     },
   });
   try {
@@ -398,12 +391,10 @@ test("uses createImageBitmap only as an unknown-format fallback and closes it", 
       project([file(0)]),
       [resolved(0, new Uint8Array([1, 2, 3, 4]))],
     );
-    assert.equal(result.complete, true);
-    assert.equal(result.project.files[0]?.width, 17);
-    assert.equal(result.project.files[0]?.height, 19);
-    assert.deepEqual(result.updatedFileIndexes, [0]);
-    assert.equal(calls, 1);
-    assert.equal(closes, 1);
+    assert.equal(result.complete, false);
+    assert.equal(result.issues[0]?.code, "IMAGE_FORMAT_UNSUPPORTED");
+    assert.deepEqual(result.updatedFileIndexes, []);
+    assert.equal(calls, 0);
   } finally {
     if (descriptor) {
       Object.defineProperty(globalThis, "createImageBitmap", descriptor);

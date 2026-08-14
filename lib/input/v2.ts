@@ -23,6 +23,7 @@ import type {
   ProjectType,
   SplitType,
 } from "../model/project.ts";
+import { APP_VERSION, isSupportedProjectType } from "../release.ts";
 import {
   MAX_IMAGE_DIMENSION,
   MAX_IMAGE_PIXELS,
@@ -61,6 +62,8 @@ interface ParseContext {
   readonly fileName?: string;
   readonly diagnostics: ProjectDiagnostic[];
   readonly archive?: ArchiveContext;
+  contourPointCount: number;
+  contourPointLimitExceeded: boolean;
 }
 
 interface ArchiveContext {
@@ -178,6 +181,8 @@ export function parseV2SubvisionProject(
     format: "v2-subvisionproj",
     fileName: input.fileName,
     diagnostics: [],
+    contourPointCount: 0,
+    contourPointLimitExceeded: false,
   };
   return parseProjectJson(input.jsonText, context);
 }
@@ -198,6 +203,8 @@ export function parseV2VisionProject(
     fileName: input.fileName,
     diagnostics,
     archive,
+    contourPointCount: 0,
+    contourPointLimitExceeded: false,
   };
   return parseProjectJson(input.projectJsonText, context);
 }
@@ -269,14 +276,14 @@ function parseProjectJson(text: string, context: ParseContext): ProjectParseResu
 
   if (!name || !rawType) return failure(context.diagnostics);
   const type = normalizeProjectType(rawType);
-  if (type === "unknown") {
+  if (!isSupportedProjectType(type)) {
     addDiagnostic(context, {
       code: "V2_PROJECT_TYPE_UNSUPPORTED",
       category: "compatibility",
       severity: "error",
       disposition: "block",
       path: "$.project.projectType",
-      message: `V2 project type '${rawType}' has no verified V1 mapping.`,
+      message: `V2 project type '${rawType}' is outside the v${APP_VERSION} release scope and has no verified cross-version mapping.`,
       details: { rawProjectType: rawType },
     });
   }
@@ -818,6 +825,7 @@ function parseFiles(
   const files: ProjectFileIR[] = [];
 
   for (const [index, raw] of values.entries()) {
+    if (context.contourPointLimitExceeded) return undefined;
     const path = `$.project.projectFiles[${index}]`;
     reportUnknownFields(context, raw, FILE_KNOWN_FIELDS, path, "file");
     const sourceId = sourceIdValue(raw.fileId);
@@ -960,6 +968,7 @@ function parseFiles(
       width,
       height,
     );
+    if (context.contourPointLimitExceeded) return undefined;
     const labels = parsedLabels.labels;
     validateGeometryBounds(context, labels, width, height, path);
     const segmentationIsNormal =
@@ -1096,7 +1105,9 @@ function parseLabels(
     );
   }
 
-  const labels = values.map((raw, index) => {
+  const labels: ProjectLabelIR[] = [];
+  for (const [index, raw] of values.entries()) {
+    if (context.contourPointLimitExceeded) break;
     const path = `${filePath}.labelDataList[${index}]`;
     reportUnknownFields(context, raw, LABEL_KNOWN_FIELDS, path, "label");
     const classIndex = resolveClassIndex(context, raw, classes, path, true);
@@ -1105,6 +1116,7 @@ function parseLabels(
       validateContourSize(context, raw.contourSize, path);
     }
     const geometry = parseLabelGeometry(context, raw, kind, path);
+    if (context.contourPointLimitExceeded) break;
     if (kind === "unknown") {
       compatibility(context, {
         code: "V2_LABEL_GEOMETRY_UNSUPPORTED",
@@ -1127,7 +1139,7 @@ function parseLabels(
         details: { labelType: optionalString(raw.labelType) ?? "" },
       });
     }
-    return {
+    labels.push({
       ...(sourceId !== undefined ? { sourceId } : {}),
       index,
       kind,
@@ -1142,8 +1154,8 @@ function parseLabels(
       geometry,
       synthesized: false,
       raw,
-    };
-  });
+    });
+  }
   return { labels };
 }
 
@@ -1203,7 +1215,9 @@ function parseClassificationLabels(
     });
   }
 
-  const labels = values.map((raw, index): ProjectLabelIR => {
+  const labels: ProjectLabelIR[] = [];
+  for (const [index, raw] of values.entries()) {
+    if (context.contourPointLimitExceeded) break;
     const path = `${filePath}.labelDataList[${index}]`;
     reportUnknownFields(context, raw, LABEL_KNOWN_FIELDS, path, "label");
     const classIndex = resolveClassIndex(context, raw, classes, path, true);
@@ -1220,7 +1234,15 @@ function parseClassificationLabels(
         details: { labelType: optionalString(raw.labelType) ?? "" },
       });
     }
-    return {
+    const geometry = parseClassificationGeometry(
+      context,
+      raw,
+      path,
+      imageWidth,
+      imageHeight,
+    );
+    if (context.contourPointLimitExceeded) break;
+    labels.push({
       ...(sourceId !== undefined ? { sourceId } : {}),
       index,
       kind: "classification",
@@ -1232,17 +1254,11 @@ function parseClassificationLabels(
         : cls
           ? { sourceClassName: cls.name }
           : {}),
-      geometry: parseClassificationGeometry(
-        context,
-        raw,
-        path,
-        imageWidth,
-        imageHeight,
-      ),
+      geometry,
       synthesized: false,
       raw,
-    };
-  });
+    });
+  }
 
   const labelClassIndexes = Array.from(
     new Set(
@@ -1694,6 +1710,8 @@ function parseContours(
     0,
   );
   if (contourPointCount > V2_PROJECT_LIMITS.maxContourPoints) {
+    context.contourPointCount = V2_PROJECT_LIMITS.maxContourPoints + 1;
+    context.contourPointLimitExceeded = true;
     addDiagnostic(context, {
       code: "V2_CONTOUR_POINT_LIMIT_EXCEEDED",
       category: "security",
@@ -1703,6 +1721,26 @@ function parseContours(
       message: `A V2 contour must not exceed ${V2_PROJECT_LIMITS.maxContourPoints} total points.`,
       details: {
         contourPointCount,
+        maximum: V2_PROJECT_LIMITS.maxContourPoints,
+      },
+    });
+    return [];
+  }
+  context.contourPointCount = Math.min(
+    V2_PROJECT_LIMITS.maxContourPoints + 1,
+    context.contourPointCount + contourPointCount,
+  );
+  if (context.contourPointCount > V2_PROJECT_LIMITS.maxContourPoints) {
+    context.contourPointLimitExceeded = true;
+    addDiagnostic(context, {
+      code: "V2_CONTOUR_POINT_LIMIT_EXCEEDED",
+      category: "security",
+      severity: "error",
+      disposition: "block",
+      path: "$.project.projectFiles[*].labelDataList[*].labelContour",
+      message: `Total V2 contour point count must not exceed ${V2_PROJECT_LIMITS.maxContourPoints}.`,
+      details: {
+        observedCountAtLeast: context.contourPointCount,
         maximum: V2_PROJECT_LIMITS.maxContourPoints,
       },
     });
@@ -2062,6 +2100,8 @@ function validateArchive(
     format: "v2-visionproj",
     fileName: input.fileName,
     diagnostics,
+    contourPointCount: 0,
+    contourPointLimitExceeded: false,
   };
   if (input.entries.length > BROWSER_ARCHIVE_LIMITS.maxEntries) {
     addDiagnostic(context, {

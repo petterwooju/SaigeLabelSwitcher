@@ -10,6 +10,7 @@ import type {
   PointIR,
   SplitType,
 } from "../model/project.ts";
+import { APP_VERSION, isSupportedProjectType } from "../release.ts";
 import {
   MAX_IMAGE_DIMENSION,
   MAX_IMAGE_PIXELS,
@@ -19,6 +20,7 @@ import {
   ARCHIVE_ENTRY_SEGMENT_MAX_BYTES,
   appendBoundedProjectDiagnostic,
   BROWSER_ARCHIVE_LIMITS,
+  countProjectContourPoints,
   EXTERNAL_PROJECT_PATH_MAX_BYTES,
   exceedsUtf8ByteLimit,
   inspectJsonResourceUsage,
@@ -403,6 +405,16 @@ function validateProjectResourceLimits(
     );
     valid = false;
   }
+  const totalContourPoints = countProjectContourPoints(project);
+  if (totalContourPoints > V2_PROJECT_LIMITS.maxContourPoints) {
+    resourceBlock(
+      diagnostics,
+      "V2_WRITE_CONTOUR_POINT_LIMIT_EXCEEDED",
+      "$.files[*].labels[*].geometry.contours",
+      `Total V2 contour point count exceeds ${V2_PROJECT_LIMITS.maxContourPoints}.`,
+    );
+    valid = false;
+  }
   if (totalSplits > V2_PROJECT_LIMITS.maxSplitMemberships) {
     resourceBlock(
       diagnostics,
@@ -614,15 +626,12 @@ function validateSupportedProject(
     );
     return false;
   }
-  if (
-    project.project.type !== "classification" &&
-    project.project.type !== "segmentation"
-  ) {
+  if (!isSupportedProjectType(project.project.type)) {
     block(
       diagnostics,
       "V2_WRITE_GOLDEN_REQUIRED",
       "$.project.type",
-      `${project.project.type} output is disabled until a verified V2 golden project is available.`,
+      `${project.project.type} output is not available in v${APP_VERSION}; a verified V2 golden project is required first.`,
     );
     return false;
   }

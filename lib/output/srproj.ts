@@ -8,6 +8,14 @@ import type {
   ProjectLabelIR,
   SplitType,
 } from "../model/project.ts";
+import { APP_VERSION, isSupportedProjectType } from "../release.ts";
+import {
+  countProjectContourPoints,
+  exceedsUtf8ByteLimit,
+  PROJECT_TEXT_MAX_BYTES,
+  V1_PROJECT_LIMITS,
+  V2_PROJECT_LIMITS,
+} from "../security/resourceLimits.ts";
 
 export interface SrprojWriteOptions {
   /** V1 schema version is intentionally pinned to the verified golden version. */
@@ -47,14 +55,19 @@ export function writeSrproj(
   options: SrprojWriteOptions = {},
 ): string {
   assertWriterCompatibility(project, "v1", options.allowConfirmedLoss ?? false);
-  if (
-    project.project.type !== "classification" &&
-    project.project.type !== "segmentation"
-  ) {
+  if (!isSupportedProjectType(project.project.type)) {
     throw new SrprojWriteError(
       "SRPROJ_PROJECT_TYPE_UNSUPPORTED",
       "$.project.type",
-      `Only Classification and polygon Segmentation have verified V1 writers; received '${project.project.rawType}'.`,
+      `v${APP_VERSION} supports only Classification and polygon Segmentation; received '${project.project.rawType}'.`,
+    );
+  }
+  const totalContourPoints = countProjectContourPoints(project);
+  if (totalContourPoints > V2_PROJECT_LIMITS.maxContourPoints) {
+    throw new SrprojWriteError(
+      "SRPROJ_CONTOUR_POINT_LIMIT_EXCEEDED",
+      "$.files[*].labels[*].geometry.contours",
+      `Total contour point count exceeds ${V2_PROJECT_LIMITS.maxContourPoints}.`,
     );
   }
 
@@ -140,7 +153,53 @@ export function writeSrproj(
   }
 
   lines.push("  </ImageGroup>", "</Project>", "");
-  return lines.join(lineEnding);
+  const xml = lines.join(lineEnding);
+  assertGeneratedXmlResourceLimits(xml);
+  return xml;
+}
+
+function assertGeneratedXmlResourceLimits(xml: string): void {
+  if (exceedsUtf8ByteLimit(xml, PROJECT_TEXT_MAX_BYTES)) {
+    throw new SrprojWriteError(
+      "SRPROJ_XML_TEXT_LIMIT_EXCEEDED",
+      "$",
+      `Generated .srproj XML exceeds the ${PROJECT_TEXT_MAX_BYTES}-byte UTF-8 limit.`,
+    );
+  }
+
+  let nodeCount = 0;
+  let attributeCount = 0;
+  for (let index = 0; index < xml.length; index += 1) {
+    if (xml[index] !== "<") continue;
+    const next = xml[index + 1];
+    const closing = next === "/" || next === "?" || next === "!";
+    const end = xml.indexOf(">", index + 1);
+    if (end < 0) break;
+    if (!closing) {
+      nodeCount += 1;
+      for (let cursor = index + 1; cursor < end - 1; cursor += 1) {
+        if (xml[cursor] === "=" && xml[cursor + 1] === '"') {
+          attributeCount += 1;
+        }
+      }
+    }
+    index = end;
+  }
+
+  if (nodeCount > V1_PROJECT_LIMITS.maxNodes) {
+    throw new SrprojWriteError(
+      "SRPROJ_XML_NODE_LIMIT_EXCEEDED",
+      "$",
+      `Generated .srproj XML contains ${nodeCount} elements; the safe limit is ${V1_PROJECT_LIMITS.maxNodes}.`,
+    );
+  }
+  if (attributeCount > V1_PROJECT_LIMITS.maxAttributes) {
+    throw new SrprojWriteError(
+      "SRPROJ_XML_ATTRIBUTE_LIMIT_EXCEEDED",
+      "$",
+      `Generated .srproj XML contains ${attributeCount} attributes; the safe limit is ${V1_PROJECT_LIMITS.maxAttributes}.`,
+    );
+  }
 }
 
 function structuralSegmentationOkClassIndex(project: ProjectIR): number | undefined {

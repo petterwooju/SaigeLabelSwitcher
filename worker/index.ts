@@ -19,7 +19,13 @@ const worker = {
     env: WorkerEnv,
     context: WorkerExecutionContext,
   ): Promise<Response> {
-    const response = await handler.fetch(request, env, context);
+    const requestHeaders = new Headers(request.headers);
+    requestHeaders.set(
+      "x-saigevision-request-origin",
+      new URL(request.url).origin,
+    );
+    const trustedRequest = new Request(request, { headers: requestHeaders });
+    const response = await handler.fetch(trustedRequest, env, context);
     const headers = new Headers(response.headers);
     headers.set(
       "Content-Security-Policy",
@@ -33,6 +39,10 @@ const worker = {
     headers.set("Cross-Origin-Opener-Policy", "same-origin");
     headers.set("Cross-Origin-Resource-Policy", "same-origin");
     headers.set("X-Content-Type-Options", "nosniff");
+    if (/^text\/html\b/iu.test(headers.get("content-type") ?? "")) {
+      headers.set("Cache-Control", "no-store");
+      headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+    }
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,

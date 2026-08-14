@@ -9,6 +9,9 @@ import {
   type RefObject,
 } from "react";
 import "./converter.css";
+import type { ProjectSourceFormat } from "../lib/model/project.ts";
+import { APP_VERSION } from "../lib/release.ts";
+import type { ProjectOutputFormat } from "./projectCapabilities.ts";
 
 export type ConverterLanguage = "zh" | "en" | "ko";
 
@@ -24,17 +27,9 @@ export type ConverterStatus =
   | "error"
   | "unsupported";
 
-export type ConverterSourceFormat =
-  | "v1-srproj"
-  | "v1-svpa"
-  | "v2-visionproj"
-  | "v2-subvisionproj";
+export type ConverterSourceFormat = ProjectSourceFormat;
 
-export type ConverterOutputFormat =
-  | "visionproj"
-  | "subvisionproj"
-  | "srproj"
-  | "svpa-zip";
+export type ConverterOutputFormat = ProjectOutputFormat;
 
 export interface ConverterSourceSummary {
   readonly format: ConverterSourceFormat;
@@ -50,7 +45,7 @@ export interface ConverterSourceSummary {
 }
 
 export interface ConverterOutputOption {
-  readonly id: string;
+  readonly id: ConverterOutputFormat;
   readonly format: ConverterOutputFormat;
   readonly selected: boolean;
   readonly recommended?: boolean;
@@ -100,6 +95,7 @@ export interface ConverterConfirmation {
   readonly required: boolean;
   readonly checked: boolean;
   readonly message?: string;
+  readonly label?: string;
 }
 
 export type ConverterProgressStage =
@@ -140,7 +136,7 @@ export interface ConverterShellProps {
   readonly canSave?: boolean;
   readonly onSelectFile: (files: readonly File[]) => void;
   readonly onDrop: (files: readonly File[]) => void;
-  readonly onTargetChange: (targetId: string) => void;
+  readonly onTargetChange: (targetId: ConverterOutputFormat) => void;
   readonly onSelectDirectory: () => void;
   readonly onSelectImageFiles: () => void;
   readonly onSelectImageZip: () => void;
@@ -155,7 +151,7 @@ export interface ConverterShellProps {
 const copy = {
   zh: {
     title: "SaigeVision 项目转换",
-    subtitle: "在 V1 与 V2 项目格式之间转换。",
+    subtitle: "在 V1 与 V2 之间转换 Classification 和 Segmentation 项目。",
     privacy: "本地处理 · 不上传项目或图片",
     languageLabel: "选择界面语言",
     projectFile: "项目文件",
@@ -193,6 +189,9 @@ const copy = {
     imagesIncompleteDimensions: "需要为每个项目图片找到唯一文件，才能读取尺寸并生成 .subvisionproj。",
     showRemaining: (count: number) => `查看其余 ${count} 项`,
     diagnostics: "转换检查",
+    severityError: "错误：",
+    severityWarning: "警告：",
+    severityInfo: "信息：",
     showMoreDiagnostics: (count: number) => `查看其余 ${count} 项`,
     confirmationHeading: "需要确认",
     confirmationDefault: "目标格式无法保留上方列出的部分源字段。",
@@ -206,7 +205,7 @@ const copy = {
     successDownload: "浏览器下载已开始，请在下载列表中查看。",
     successFallback: "项目文件已生成。",
     another: "转换另一个项目",
-    unsupported: "当前项目没有可安全生成的目标格式。",
+    unsupported: "v0.0.1 仅支持 Classification 和多边形 Segmentation。",
     genericError: "转换未完成，源文件未被修改。",
     fileInputLabel: "选择一个 SaigeVision 项目文件",
     statusLabel: "转换状态",
@@ -253,7 +252,7 @@ const copy = {
   },
   en: {
     title: "SaigeVision Project Converter",
-    subtitle: "Convert projects between SaigeVision V1 and V2.",
+    subtitle: "Convert Classification and Segmentation projects between SaigeVision V1 and V2.",
     privacy: "Processed locally · Projects and images are never uploaded",
     languageLabel: "Choose interface language",
     projectFile: "Project file",
@@ -291,6 +290,9 @@ const copy = {
     imagesIncompleteDimensions: "Every project image needs one unique match before its dimensions can be read and the .subvisionproj file created.",
     showRemaining: (count: number) => `Show ${count} more`,
     diagnostics: "Conversion checks",
+    severityError: "Error: ",
+    severityWarning: "Warning: ",
+    severityInfo: "Information: ",
     showMoreDiagnostics: (count: number) => `Show ${count} more`,
     confirmationHeading: "Confirmation required",
     confirmationDefault: "The target format cannot preserve some source fields listed above.",
@@ -304,7 +306,7 @@ const copy = {
     successDownload: "The browser download has started. Check your downloads list.",
     successFallback: "The project file was created.",
     another: "Convert another project",
-    unsupported: "This project has no target format that can be created safely.",
+    unsupported: "v0.0.1 supports only Classification and polygon Segmentation.",
     genericError: "Conversion did not finish. The source file was not changed.",
     fileInputLabel: "Choose one SaigeVision project file",
     statusLabel: "Conversion status",
@@ -351,7 +353,7 @@ const copy = {
   },
   ko: {
     title: "SaigeVision 프로젝트 변환",
-    subtitle: "V1과 V2 프로젝트 형식 사이를 변환합니다.",
+    subtitle: "SaigeVision V1과 V2 사이에서 Classification 및 Segmentation 프로젝트를 변환합니다.",
     privacy: "로컬 처리 · 프로젝트와 이미지를 업로드하지 않음",
     languageLabel: "인터페이스 언어 선택",
     projectFile: "프로젝트 파일",
@@ -389,6 +391,9 @@ const copy = {
     imagesIncompleteDimensions: "이미지 크기를 읽고 .subvisionproj 파일을 만들려면 각 프로젝트 이미지가 하나의 파일과 정확히 일치해야 합니다.",
     showRemaining: (count: number) => `${count}개 더 보기`,
     diagnostics: "변환 검사",
+    severityError: "오류: ",
+    severityWarning: "경고: ",
+    severityInfo: "정보: ",
     showMoreDiagnostics: (count: number) => `${count}개 더 보기`,
     confirmationHeading: "확인 필요",
     confirmationDefault: "대상 형식은 위에 나열된 일부 원본 필드를 보존할 수 없습니다.",
@@ -402,7 +407,7 @@ const copy = {
     successDownload: "브라우저 다운로드를 시작했습니다. 다운로드 목록을 확인하세요.",
     successFallback: "프로젝트 파일을 만들었습니다.",
     another: "다른 프로젝트 변환",
-    unsupported: "이 프로젝트에서 안전하게 만들 수 있는 대상 형식이 없습니다.",
+    unsupported: "v0.0.1은 Classification 및 다각형 Segmentation만 지원합니다.",
     genericError: "변환이 완료되지 않았습니다. 원본 파일은 변경되지 않았습니다.",
     fileInputLabel: "SaigeVision 프로젝트 파일 하나 선택",
     statusLabel: "변환 상태",
@@ -560,7 +565,9 @@ export function ConverterShell({
     >
       <div className="converter-shell__frame">
         <header className="converter-shell__header">
-          <div className="converter-shell__brand">SaigeVision</div>
+          <div className="converter-shell__brand">
+            SaigeVision <span>{`v${APP_VERSION}`}</span>
+          </div>
           <div className="converter-shell__header-actions">
             <div className="converter-shell__privacy">
               <span aria-hidden="true">●</span>
@@ -956,7 +963,7 @@ function OutputSection({
   text: LocalizedCopy;
   name: string;
   disabled: boolean;
-  onTargetChange: (targetId: string) => void;
+  onTargetChange: (targetId: ConverterOutputFormat) => void;
 }) {
   return (
     <fieldset className="converter-section converter-output">
@@ -1186,7 +1193,6 @@ function DiagnosticSection({
     <section
       className="converter-section converter-diagnostics"
       aria-labelledby={headingId}
-      role={hasError ? "alert" : undefined}
       aria-live={hasError ? "assertive" : "polite"}
     >
       <h2 id={headingId} ref={headingRef} tabIndex={headingRef ? -1 : undefined}>
@@ -1194,7 +1200,7 @@ function DiagnosticSection({
       </h2>
       <ul>
         {visible.map((diagnostic, index) => (
-          <DiagnosticRow diagnostic={diagnostic} key={`${diagnostic.code ?? "diagnostic"}-${index}`} />
+          <DiagnosticRow diagnostic={diagnostic} text={text} key={`${diagnostic.code ?? "diagnostic"}-${index}`} />
         ))}
       </ul>
       {remaining.length > 0 ? (
@@ -1202,7 +1208,7 @@ function DiagnosticSection({
           <summary>{text.showMoreDiagnostics(remaining.length)}</summary>
           <ul>
             {remaining.map((diagnostic, index) => (
-              <DiagnosticRow diagnostic={diagnostic} key={`${diagnostic.code ?? "diagnostic"}-more-${index}`} />
+              <DiagnosticRow diagnostic={diagnostic} text={text} key={`${diagnostic.code ?? "diagnostic"}-more-${index}`} />
             ))}
           </ul>
         </details>
@@ -1211,13 +1217,25 @@ function DiagnosticSection({
   );
 }
 
-function DiagnosticRow({ diagnostic }: { diagnostic: ConverterDiagnostic }) {
+function DiagnosticRow({
+  diagnostic,
+  text,
+}: {
+  diagnostic: ConverterDiagnostic;
+  text: LocalizedCopy;
+}) {
+  const severityLabel = diagnostic.severity === "error"
+    ? text.severityError
+    : diagnostic.severity === "warning"
+      ? text.severityWarning
+      : text.severityInfo;
   return (
     <li className="converter-diagnostic" data-severity={diagnostic.severity}>
       <span className="converter-diagnostic__mark" aria-hidden="true">
         {diagnostic.severity === "error" ? "!" : diagnostic.severity === "warning" ? "!" : "i"}
       </span>
       <span>
+        <span className="converter-visually-hidden">{severityLabel}</span>
         <span className="converter-diagnostic__message">{diagnostic.message}</span>
         {diagnostic.code || diagnostic.path ? (
           <small>
@@ -1260,7 +1278,7 @@ function ConfirmationSection({
           aria-describedby={`${inputId}-description`}
           onChange={(event) => onChange(event.currentTarget.checked)}
         />
-        <span>{text.confirmationLabel}</span>
+        <span>{confirmation.label ?? text.confirmationLabel}</span>
       </label>
     </section>
   );

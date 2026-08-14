@@ -20,7 +20,12 @@ import {
   type ImageMatchIssue,
   type ImageMatchSummary,
 } from "./ConverterShell";
-import { allowedOutputs } from "./projectCapabilities.ts";
+import {
+  allowedOutputs,
+  hasRelativeExternalPaths,
+  targetConfirmationMode,
+  targetIncludesDiagnostic,
+} from "./projectCapabilities.ts";
 import {
   openValidatedZip,
   type OpenArchive,
@@ -94,7 +99,7 @@ const uiCopy = {
     multiple: "一次只能转换一个项目文件。",
     blocked: "该项目包含目标版本无法安全表示的内容，因此没有生成文件。",
     invalid: "项目文件已损坏或内容不完整，无法安全读取。",
-    unsupported: "该项目类型当前没有经过真实样本验证的安全转换路径。",
+    unsupported: "v0.0.1 仅支持 Classification 和多边形 Segmentation；该项目类型留待后续版本。",
     emptyProject: "项目中没有图片，当前没有可安全生成的目标格式。",
     detection: "检测 (Detection)",
     segmentation: "分割 (Segmentation)",
@@ -122,11 +127,20 @@ const uiCopy = {
     helperUnsigned: "V1 完整项目 ZIP 会包含固定哈希校验的路径修复助手；该助手目前没有 Authenticode 签名。企业环境请先由管理员审批。",
     dimensions: "正在读取图片尺寸…",
     imageFailure: "部分图片无法读取或不是受支持的图片格式。",
+    imageDimensionsMismatch: "项目记录的图片尺寸与实际图片不一致，已停止转换。",
+    imageFormatUnsupported: "图片不是已验证支持的 PNG、JPEG、BMP、GIF 或 WebP 格式。",
+    imageFormatMismatch: "图片扩展名或 MIME 类型与实际文件格式不一致。",
+    imageTooLarge: "图片尺寸超过安全处理上限。",
+    imageReadFailed: "无法安全读取部分项目图片。",
     saveFailed: "转换未完成，源文件未被修改。",
     savePickerDownloadFallback: "无法打开系统保存位置选择器，已改用浏览器下载。",
     blobFallbackTooLarge: "项目过大，当前浏览器无法安全地在内存中完成下载。请使用最新版桌面 Edge 或 Chrome。",
     confirmation: "目标版本无法保留上方列出的部分源字段；确认后将按已验证的核心字段转换。",
     relativeSubvision: "轻量项目必须引用可用的绝对图片路径；当前项目含相对路径，请改选 .visionproj。",
+    relativeV1Path: "导出的 .srproj 会保留相对图片路径；如果文件位置改变，V1 可能找不到原图片。",
+    relativePathConfirmation: "我了解导出的 .srproj 会保留相对图片路径，文件位置改变后 V1 可能需要重新定位图片。",
+    mixedConfirmation: "导出的 .srproj 会保留相对图片路径，文件位置改变后 V1 可能找不到原图片；同时，上方列出的其他源字段不会写入目标格式。",
+    mixedConfirmationLabel: "我了解相对路径风险以及上方其他字段不会写入目标格式，并继续转换。",
   },
   en: {
     type: "Classification",
@@ -136,7 +150,7 @@ const uiCopy = {
     multiple: "Choose exactly one project file at a time.",
     blocked: "The project contains data that cannot be represented safely in the target version.",
     invalid: "The project file is damaged or incomplete and could not be read safely.",
-    unsupported: "No safe conversion path for this project type has been verified against real samples yet.",
+    unsupported: "v0.0.1 supports only Classification and polygon Segmentation; this project type is planned for a later release.",
     emptyProject: "The project contains no images, so no target format can be created safely.",
     detection: "Detection",
     segmentation: "Segmentation",
@@ -164,11 +178,20 @@ const uiCopy = {
     helperUnsigned: "The V1 complete project ZIP includes a hash-pinned path repair helper. It is not currently Authenticode-signed; obtain administrator approval before enterprise use.",
     dimensions: "Reading image dimensions…",
     imageFailure: "Some files could not be read as supported images.",
+    imageDimensionsMismatch: "A recorded image size does not match the actual file, so conversion stopped.",
+    imageFormatUnsupported: "An image is not a verified PNG, JPEG, BMP, GIF, or WebP file.",
+    imageFormatMismatch: "An image extension or MIME type does not match its actual file format.",
+    imageTooLarge: "An image exceeds the safe dimension limit.",
+    imageReadFailed: "Some project images could not be read safely.",
     saveFailed: "Conversion did not finish. The source file was not changed.",
     savePickerDownloadFallback: "The system save-location picker was unavailable, so the browser download fallback will be used.",
     blobFallbackTooLarge: "This project is too large for a safe in-memory browser download. Use the latest desktop Edge or Chrome.",
     confirmation: "Some source fields listed above cannot be retained in the target version. Confirm to continue with the verified core fields.",
     relativeSubvision: "A lightweight project requires usable absolute image paths. This project contains relative paths; choose .visionproj instead.",
+    relativeV1Path: "The exported .srproj keeps relative image paths. V1 may not find the images if the file is moved.",
+    relativePathConfirmation: "I understand that the exported .srproj keeps relative image paths and V1 may require the images to be relocated after the file is moved.",
+    mixedConfirmation: "The exported .srproj keeps relative image paths, so V1 may not find the images if the file is moved. The other source fields listed above will also not be written to the target format.",
+    mixedConfirmationLabel: "I understand both the relative-path risk and that the other listed fields will not be written to the target format, and want to continue.",
   },
   ko: {
     type: "분류 (Classification)",
@@ -178,7 +201,7 @@ const uiCopy = {
     multiple: "프로젝트 파일을 한 번에 하나만 선택하세요.",
     blocked: "대상 버전에서 안전하게 표현할 수 없는 데이터가 포함되어 있습니다.",
     invalid: "프로젝트 파일이 손상되었거나 불완전하여 안전하게 읽을 수 없습니다.",
-    unsupported: "이 프로젝트 유형에는 실제 샘플로 검증된 안전한 변환 경로가 아직 없습니다.",
+    unsupported: "v0.0.1은 Classification 및 다각형 Segmentation만 지원합니다. 이 프로젝트 유형은 이후 버전에서 지원할 예정입니다.",
     emptyProject: "프로젝트에 이미지가 없어 안전하게 만들 수 있는 대상 형식이 없습니다.",
     detection: "검출 (Detection)",
     segmentation: "분할 (Segmentation)",
@@ -206,11 +229,20 @@ const uiCopy = {
     helperUnsigned: "V1 전체 프로젝트 ZIP에는 해시로 고정 검증되는 경로 복구 도구가 포함됩니다. 현재 Authenticode 서명이 없으므로 기업 환경에서는 관리자 승인을 받으세요.",
     dimensions: "이미지 크기를 읽는 중…",
     imageFailure: "일부 파일을 지원되는 이미지로 읽을 수 없습니다.",
+    imageDimensionsMismatch: "프로젝트에 기록된 이미지 크기와 실제 파일이 일치하지 않아 변환을 중지했습니다.",
+    imageFormatUnsupported: "이미지가 검증된 PNG, JPEG, BMP, GIF 또는 WebP 형식이 아닙니다.",
+    imageFormatMismatch: "이미지 확장자 또는 MIME 유형이 실제 파일 형식과 일치하지 않습니다.",
+    imageTooLarge: "이미지 크기가 안전 처리 한도를 초과합니다.",
+    imageReadFailed: "일부 프로젝트 이미지를 안전하게 읽을 수 없습니다.",
     saveFailed: "변환이 완료되지 않았으며 원본 파일은 변경되지 않았습니다.",
     savePickerDownloadFallback: "시스템 저장 위치 선택기를 열 수 없어 브라우저 다운로드 방식으로 전환했습니다.",
     blobFallbackTooLarge: "이 프로젝트는 브라우저 메모리 다운로드로 안전하게 처리하기에는 너무 큽니다. 최신 데스크톱 Edge 또는 Chrome을 사용하세요.",
     confirmation: "대상 버전에서 위의 일부 원본 필드를 유지할 수 없습니다. 검증된 핵심 필드로 계속하려면 확인하세요.",
     relativeSubvision: "경량 프로젝트에는 사용 가능한 절대 이미지 경로가 필요합니다. 상대 경로가 포함되어 있으므로 .visionproj를 선택하세요.",
+    relativeV1Path: "내보낸 .srproj는 상대 이미지 경로를 유지합니다. 파일을 이동하면 V1에서 원본 이미지를 찾지 못할 수 있습니다.",
+    relativePathConfirmation: "내보낸 .srproj가 상대 이미지 경로를 유지하며, 파일을 이동한 뒤 V1에서 이미지를 다시 지정해야 할 수 있음을 이해합니다.",
+    mixedConfirmation: "내보낸 .srproj는 상대 이미지 경로를 유지하므로 파일을 이동하면 V1에서 원본 이미지를 찾지 못할 수 있습니다. 또한 위에 나열된 다른 원본 필드는 대상 형식에 기록되지 않습니다.",
+    mixedConfirmationLabel: "상대 경로 위험과 위에 나열된 다른 필드가 대상 형식에 기록되지 않음을 모두 이해했으며 변환을 계속합니다.",
   },
 } satisfies Record<ConverterLanguage, Record<string, string>>;
 
@@ -222,6 +254,7 @@ interface RuntimeDiagnostic {
   readonly path?: string;
   readonly message?: string;
   readonly params?: Readonly<Record<string, string | number>>;
+  readonly fallbackCode?: string;
   readonly sticky?: boolean;
 }
 
@@ -353,15 +386,18 @@ export function ProjectConverter() {
     () => (references ? matchImageFiles(references, selectedFiles) : null),
     [references, selectedFiles],
   );
+  const confirmationMode = loaded && isCrossVersion(loaded.format, target)
+    ? targetConfirmationMode(loaded.parseResult.diagnostics, target)
+    : "none";
   const needsConfirmation = Boolean(
     loaded?.parseResult.compatibility.status === "confirmation-required" &&
-      isCrossVersion(loaded.format, target),
+      confirmationMode !== "none",
   );
-  const relativeSubvisionPath = Boolean(
+  const projectHasRelativePaths = Boolean(
     project &&
-      target === "subvisionproj" &&
-      project.files.some((file) => !isAbsoluteExternalPath(unquotePath(file.sourcePath))),
+      hasRelativeExternalPaths(project.files.map((file) => file.sourcePath)),
   );
+  const relativeSubvisionPath = projectHasRelativePaths && target === "subvisionproj";
   const compatibilityBlocked = Boolean(
     loaded?.parseResult.compatibility.status === "blocked" &&
       isCrossVersion(loaded.format, target),
@@ -520,13 +556,13 @@ export function ProjectConverter() {
           fileSize: sourceFile.size,
         });
         setProgress(null);
-        setRuntimeDiagnostics([diagnosticFromError(error, uiCopy[language].invalid)]);
+        setRuntimeDiagnostics([diagnosticFromError(error, "PROJECT_PARSE_FAILED")]);
         setStatus("error");
       } finally {
         finishOperation(operation);
       }
     },
-    [beginOperation, finishOperation, invalidateActiveOperation, language],
+    [beginOperation, finishOperation, invalidateActiveOperation],
   );
 
   const chooseDirectory = useCallback(async () => {
@@ -556,7 +592,7 @@ export function ProjectConverter() {
         fallbackDirectoryContextRef.current = null;
         setRuntimeDiagnostics((current) => [
           ...current.filter((item) => item.code !== "DIRECTORY_UNSUPPORTED"),
-          diagnosticFromError(error, uiCopy[language].directoryUnsupported),
+          diagnosticFromError(error, "DIRECTORY_UNSUPPORTED"),
         ]);
       }
       return;
@@ -617,7 +653,7 @@ export function ProjectConverter() {
       } else {
         setRuntimeDiagnostics((current) => replaceImageSourceDiagnostic(
           current,
-          directoryDiagnosticFromError(error, uiCopy[language].directoryUnsupported),
+          directoryDiagnosticFromError(error, "DIRECTORY_UNSUPPORTED"),
         ));
       }
     } finally {
@@ -663,7 +699,7 @@ export function ProjectConverter() {
       } catch (error) {
         setRuntimeDiagnostics((current) => replaceImageSourceDiagnostic(
           current,
-          directoryDiagnosticFromError(error, uiCopy[language].directoryUnsupported),
+          directoryDiagnosticFromError(error, "DIRECTORY_UNSUPPORTED"),
         ));
       }
     }
@@ -721,7 +757,7 @@ export function ProjectConverter() {
     } catch (error) {
       setRuntimeDiagnostics((current) => replaceImageSourceDiagnostic(
         current,
-        directoryDiagnosticFromError(error, uiCopy[language].directoryUnsupported),
+        directoryDiagnosticFromError(error, "DIRECTORY_UNSUPPORTED"),
       ));
     }
   }, [language]);
@@ -807,7 +843,7 @@ export function ProjectConverter() {
       if (isCurrent() && !signal.aborted && !isAbortError(error)) {
         setRuntimeDiagnostics((current) => replaceImageSourceDiagnostic(
           current,
-          diagnosticFromError(error, uiCopy[language].imageZipEmpty),
+          diagnosticFromError(error, "IMAGE_ZIP_EMPTY"),
         ));
       }
     } finally {
@@ -999,7 +1035,7 @@ export function ProjectConverter() {
               ? loaded.projectXmlText
               : writeSrproj(workingProject, {
                   pathForFile,
-                  allowConfirmedLoss: confirmationChecked,
+                  allowConfirmedLoss: confirmationChecked || !needsConfirmation,
                 });
           completedSave = await writeSvpaArchive({
             destination,
@@ -1050,6 +1086,7 @@ export function ProjectConverter() {
     language,
     loaded,
     matchReport,
+    needsConfirmation,
     needsImageAccess,
     requiresDimensions,
     requiresImages,
@@ -1063,6 +1100,10 @@ export function ProjectConverter() {
         format,
         selected: target === format,
         recommended: index === 0,
+        disabled: format === "subvisionproj" && projectHasRelativePaths,
+        ...(format === "subvisionproj" && projectHasRelativePaths
+          ? { disabledReason: uiCopy[language].relativeSubvision }
+          : {}),
       }));
   const imageMatch = project && needsImageAccess
     ? buildImageSummary(
@@ -1080,6 +1121,7 @@ export function ProjectConverter() {
       loaded?.parseResult.diagnostics ?? [],
       language,
       Boolean(loaded && isCrossVersion(loaded.format, target)),
+      target,
     ),
     ...runtimeDiagnostics.map((item) => toUiRuntimeDiagnostic(item, language)),
     ...(relativeSubvisionPath
@@ -1123,7 +1165,21 @@ export function ProjectConverter() {
         outputs={outputs}
         imageMatch={imageMatch}
         diagnostics={diagnostics}
-        confirmation={needsConfirmation ? { required: true, checked: confirmationChecked, message: uiCopy[language].confirmation } : null}
+        confirmation={needsConfirmation ? {
+          required: true,
+          checked: confirmationChecked,
+          message:
+            confirmationMode === "relative-path"
+              ? uiCopy[language].relativeV1Path
+              : confirmationMode === "mixed"
+                ? uiCopy[language].mixedConfirmation
+              : uiCopy[language].confirmation,
+          ...(confirmationMode === "relative-path"
+            ? { label: uiCopy[language].relativePathConfirmation }
+            : confirmationMode === "mixed"
+              ? { label: uiCopy[language].mixedConfirmationLabel }
+              : {}),
+        } : null}
         progress={progress}
         saveResult={saveResult}
         canSave={canSave}
@@ -1131,7 +1187,7 @@ export function ProjectConverter() {
         onDrop={handleFiles}
         onTargetChange={(id) => {
           if (projectUnsupported || directoryMatchingRef.current || status === "unsupported") return;
-          setTarget(id as ConverterOutputFormat);
+          setTarget(id);
           setConfirmationChecked(false);
           setSaveResult(null);
           setStatus("ready");
@@ -1300,17 +1356,6 @@ function unquotePath(value: string): string {
     : trimmed;
 }
 
-function isAbsoluteExternalPath(value: string): boolean {
-  const normalized = value.replaceAll("\\", "/");
-  if (normalized.split("/").some((segment) => segment === "..")) return false;
-  return (
-    normalized.startsWith("/") ||
-    normalized.startsWith("//") ||
-    /^[a-z]:\//iu.test(normalized) ||
-    /^file:\/\//iu.test(normalized)
-  );
-}
-
 function outputFileName(project: ProjectIR, target: ConverterOutputFormat): string {
   const stem = safeStem(project.project.name);
   if (target === "visionproj") return `${stem}.visionproj`;
@@ -1375,11 +1420,15 @@ function toUiDiagnostics(
   diagnostics: readonly ProjectDiagnostic[],
   language: ConverterLanguage,
   includeCompatibility: boolean,
+  target: ConverterOutputFormat | null,
 ): ConverterDiagnostic[] {
   const result: ConverterDiagnostic[] = [];
   let trainingSettingsAdded = false;
   for (const item of diagnostics) {
     if (item.category === "compatibility" && !includeCompatibility) continue;
+    if (!targetIncludesDiagnostic(item, target)) {
+      continue;
+    }
     if (item.severity === "info") continue;
     const nodeName = String(item.details?.nodeName ?? "");
     if (
@@ -1405,29 +1454,52 @@ function toUiRuntimeDiagnostic(
   language: ConverterLanguage,
 ): ConverterDiagnostic {
   const copy = uiCopy[language];
-  const message = item.message ?? (() => {
-    switch (item.code) {
-      case "INPUT_COUNT_INVALID": return copy.multiple;
-      case "PROJECT_PARSE_FAILED": return copy.invalid;
-      case "PROJECT_EMPTY": return copy.emptyProject;
-      case "PROJECT_UNSUPPORTED": return copy.unsupported;
-      case "DIRECTORY_PERMISSION_FALLBACK": return copy.directoryPermissionFallback;
-      case "DIRECTORY_EMPTY_FILE_LIST": return copy.directoryEmpty;
-      case "DIRECTORY_DEPTH_LIMIT": return copy.directoryDepthLimit;
-      case "DIRECTORY_FILE_LIMIT": return copy.directoryFileLimit;
-      case "DIRECTORY_SIZE_LIMIT": return copy.directorySizeLimit;
-      case "SAVE_PICKER_DOWNLOAD_FALLBACK": return copy.savePickerDownloadFallback;
-      case "BLOB_FALLBACK_TOO_LARGE": return copy.blobFallbackTooLarge;
-      case "SAVE_FAILED": return copy.saveFailed;
-      default: return copy.saveFailed;
-    }
-  })();
+  const localized = runtimeMessageForCode(item.code, copy) ??
+    (item.fallbackCode ? runtimeMessageForCode(item.fallbackCode, copy) : undefined);
+  const message = language === "en" && item.message
+    ? item.message
+    : localized ?? copy.saveFailed;
   return {
     severity: item.severity,
     code: item.code,
     path: item.path,
     message,
   };
+}
+
+function runtimeMessageForCode(
+  code: string,
+  copy: (typeof uiCopy)[ConverterLanguage],
+): string | undefined {
+  switch (code) {
+    case "INPUT_COUNT_INVALID": return copy.multiple;
+    case "PROJECT_PARSE_FAILED":
+    case "INPUT_FORMAT_UNKNOWN": return copy.invalid;
+    case "PROJECT_EMPTY": return copy.emptyProject;
+    case "PROJECT_UNSUPPORTED": return copy.unsupported;
+    case "DIRECTORY_UNSUPPORTED": return copy.directoryUnsupported;
+    case "DIRECTORY_PERMISSION_FALLBACK": return copy.directoryPermissionFallback;
+    case "DIRECTORY_EMPTY_FILE_LIST": return copy.directoryEmpty;
+    case "DIRECTORY_DEPTH_LIMIT": return copy.directoryDepthLimit;
+    case "DIRECTORY_FILE_LIMIT": return copy.directoryFileLimit;
+    case "DIRECTORY_SIZE_LIMIT": return copy.directorySizeLimit;
+    case "IMAGE_FILES_NEED_RELATIVE_PATHS": return copy.imageFilesNeedPaths;
+    case "IMAGE_ZIP_EMPTY": return copy.imageZipEmpty;
+    case "IMAGE_DIMENSIONS_MISMATCH": return copy.imageDimensionsMismatch;
+    case "IMAGE_FORMAT_UNSUPPORTED": return copy.imageFormatUnsupported;
+    case "IMAGE_FORMAT_MISMATCH": return copy.imageFormatMismatch;
+    case "IMAGE_DIMENSIONS_TOO_LARGE": return copy.imageTooLarge;
+    case "IMAGE_SOURCE_MISSING":
+    case "IMAGE_SOURCE_DUPLICATE":
+    case "IMAGE_SOURCE_READ_FAILED":
+    case "IMAGE_HEADER_INVALID":
+    case "IMAGE_DIMENSIONS_INVALID": return copy.imageReadFailed;
+    case "SAVE_PICKER_DOWNLOAD_FALLBACK": return copy.savePickerDownloadFallback;
+    case "BLOB_FALLBACK_TOO_LARGE": return copy.blobFallbackTooLarge;
+    case "SAVE_FAILED": return copy.saveFailed;
+    default:
+      return code.startsWith("ZIP_") ? copy.invalid : undefined;
+  }
 }
 
 function toUiDiagnostic(
@@ -1452,6 +1524,9 @@ function localizedProjectDiagnosticMessage(
   item: ProjectDiagnostic,
   language: ConverterLanguage,
 ): string {
+  if (item.code === "V2_EXTERNAL_PATH_RELATIVE") {
+    return uiCopy[language].relativeV1Path;
+  }
   if (language === "en") return item.message;
   const copy = uiCopy[language];
   if (/TIMESTAMP|FIELD_REBUILT|ENTITY_IDS_REBUILT|CONTOUR_ID_REBUILT/u.test(item.code)) {
@@ -1493,6 +1568,7 @@ function clearImageSourceDiagnostics(
     (item) =>
       !item.code ||
       (!IMAGE_SOURCE_DIAGNOSTIC_CODES.has(item.code) &&
+        !item.code.startsWith("IMAGE_") &&
         !item.code.startsWith("ZIP_")),
   );
 }
@@ -1521,17 +1597,18 @@ async function closeOpenArchives(archives: Iterable<OpenArchive>): Promise<void>
   );
 }
 
-function diagnosticFromError(error: unknown, fallback: string): RuntimeDiagnostic {
+function diagnosticFromError(error: unknown, fallbackCode: string): RuntimeDiagnostic {
   return {
     severity: "error",
     code: error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "CONVERSION_FAILED",
-    message: error instanceof Error && error.message ? error.message : fallback,
+    ...(error instanceof Error && error.message ? { message: error.message } : {}),
+    fallbackCode,
   };
 }
 
 function directoryDiagnosticFromError(
   error: unknown,
-  fallback: string,
+  fallbackCode: string,
 ): RuntimeDiagnostic {
   const code = error instanceof DirectoryReadError
     ? error.code
@@ -1541,7 +1618,7 @@ function directoryDiagnosticFromError(
   if (code.startsWith("DIRECTORY_")) {
     return { severity: "error", code };
   }
-  return diagnosticFromError(error, fallback);
+  return diagnosticFromError(error, fallbackCode);
 }
 
 function saveDiagnosticFromError(error: unknown): RuntimeDiagnostic {

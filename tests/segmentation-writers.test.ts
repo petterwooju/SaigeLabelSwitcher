@@ -12,6 +12,7 @@ import {
   writeV2SubvisionProject,
   writeV2VisionProject,
 } from "../lib/output/v2.ts";
+import { V2_PROJECT_LIMITS } from "../lib/security/resourceLimits.ts";
 
 const OUTER_V1: readonly PointIR[] = [
   { x: 1, y: 1 },
@@ -120,6 +121,55 @@ function segmentationProject(normal = false): ProjectIR {
     raw: {},
   };
 }
+
+function projectWithContourPointCount(pointCount: number): ProjectIR {
+  const source = segmentationProject();
+  const ring = Array.from({ length: pointCount }, (_, index): PointIR => {
+    if (index === 0) return { x: 0, y: 0 };
+    if (index === 1) return { x: 10, y: 0 };
+    if (index === pointCount - 1) return { x: 0, y: 10 };
+    return { x: 10, y: 10 };
+  });
+  const label = source.files[0]!.labels[0]!;
+  return {
+    ...source,
+    files: [{
+      ...source.files[0]!,
+      labels: [{
+        ...label,
+        geometry: { contours: [ring], contourRoles: ["outer"] },
+      }],
+    }],
+  };
+}
+
+test("writers reject project-wide contour totals above the shared limit", () => {
+  const source = projectWithContourPointCount(V2_PROJECT_LIMITS.maxContourPoints + 1);
+  const v2 = writeV2SubvisionProject(source);
+  assert.equal(v2.ok, false);
+  assert.equal(
+    v2.diagnostics.some((item) => item.code === "V2_WRITE_CONTOUR_POINT_LIMIT_EXCEEDED"),
+    true,
+  );
+  assert.throws(
+    () => writeSrproj(source),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "SRPROJ_CONTOUR_POINT_LIMIT_EXCEEDED",
+  );
+});
+
+test("srproj writer enforces the target XML node budget below the raw point cap", () => {
+  const source = projectWithContourPointCount(V2_PROJECT_LIMITS.maxContourPoints - 4);
+  assert.throws(
+    () => writeSrproj(source),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "SRPROJ_XML_NODE_LIMIT_EXCEEDED",
+  );
+});
 
 function area(ring: readonly (readonly [number, number])[]): number {
   let doubled = 0;

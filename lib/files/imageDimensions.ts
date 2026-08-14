@@ -17,7 +17,6 @@ export type ImageDimensionFormat =
   | "bmp"
   | "gif"
   | "webp"
-  | "browser"
   | "unknown";
 
 export type ImageDimensionIssueCode =
@@ -29,8 +28,7 @@ export type ImageDimensionIssueCode =
   | "IMAGE_DIMENSIONS_INVALID"
   | "IMAGE_DIMENSIONS_TOO_LARGE"
   | "IMAGE_DIMENSIONS_MISMATCH"
-  | "IMAGE_FORMAT_MISMATCH"
-  | "IMAGE_BITMAP_DECODE_FAILED";
+  | "IMAGE_FORMAT_MISMATCH";
 
 export interface ImageDimensionIssue {
   readonly fileIndex: number;
@@ -84,7 +82,7 @@ interface HeaderDimensions extends Dimensions {
 
 interface InvalidHeader {
   readonly kind: "invalid";
-  readonly format: Exclude<ImageDimensionFormat, "browser" | "unknown">;
+  readonly format: Exclude<ImageDimensionFormat, "unknown">;
   readonly message: string;
 }
 
@@ -334,63 +332,14 @@ async function probeSourceDimensions(
     };
   }
 
-  if (typeof globalThis.createImageBitmap !== "function") {
-    return {
-      issue: createIssue(
-        file,
-        "IMAGE_FORMAT_UNSUPPORTED",
-        "The image is not PNG, JPEG, BMP, GIF, or WebP, and this environment has no bitmap decoder fallback.",
-        "unknown",
-      ),
-    };
-  }
-
-  let blob: Blob;
-  try {
-    blob =
-      source.kind === "blob"
-        ? source.blob
-        : await source.archive.readBlob(
-            source.entryName,
-            "application/octet-stream",
-            undefined,
-            signal,
-          );
-  } catch (error) {
-    if (isAbortError(error)) throw error;
-    return {
-      issue: createIssue(
-        file,
-        "IMAGE_SOURCE_READ_FAILED",
-        `Unable to read the image for bitmap decoding: ${errorMessage(error)}`,
-        "unknown",
-      ),
-    };
-  }
-
-  try {
-    const bitmap = await globalThis.createImageBitmap(blob);
-    try {
-      return {
-        dimensions: {
-          width: bitmap.width,
-          height: bitmap.height,
-          format: "browser",
-        },
-      };
-    } finally {
-      bitmap.close();
-    }
-  } catch (error) {
-    return {
-      issue: createIssue(
-        file,
-        "IMAGE_BITMAP_DECODE_FAILED",
-        `The browser could not decode this image: ${errorMessage(error)}`,
-        "unknown",
-      ),
-    };
-  }
+  return {
+    issue: createIssue(
+      file,
+      "IMAGE_FORMAT_UNSUPPORTED",
+      "The image is not a verified PNG, JPEG, BMP, GIF, or WebP file.",
+      "unknown",
+    ),
+  };
 }
 
 async function readHeaderBytes(
@@ -624,7 +573,6 @@ function validateDetectedFormat(
   source: BinarySource,
   detected: Dimensions,
 ): ImageDimensionIssue | undefined {
-  if (detected.format === "browser") return undefined;
   const extensionFormat = formatFromExtension(file.fileName || file.sourcePath);
   let mimeFormat: ImageDimensionFormat | undefined;
   if (source.kind === "blob") {
@@ -707,7 +655,7 @@ function createIssue(
 }
 
 function dimensions(
-  format: Exclude<ImageDimensionFormat, "browser" | "unknown">,
+  format: Exclude<ImageDimensionFormat, "unknown">,
   width: number,
   height: number,
 ): HeaderDimensions {

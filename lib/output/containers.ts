@@ -2,6 +2,8 @@ import { TextReader, type ZipWriter } from "@zip.js/zip.js";
 import type { OpenArchive } from "../archive/zip.ts";
 import { parseV1Srproj } from "../input/v1.ts";
 import type { ProjectIR } from "../model/project.ts";
+import { APP_VERSION } from "../release.ts";
+import { BROWSER_ARCHIVE_LIMITS } from "../security/resourceLimits.ts";
 import {
   pathComparisonKey,
   validateZipEntryPath,
@@ -87,9 +89,13 @@ export async function writeVisionArchive({
   signal,
 }: VisionArchiveOptions): Promise<SaveResult> {
   throwIfAborted(signal);
+  const totalFiles = containerArchiveEntryCount(
+    "vision",
+    built.imageEntries.length,
+  );
   const imageByIndex = uniqueImagesByIndex(images);
   const jsonBytes = utf8Size(built.projectJsonText);
-  const imageBytes = built.imageEntries.reduce((total, entry) => {
+  const imageSizes = built.imageEntries.map((entry) => {
     const image = imageByIndex.get(entry.fileIndex);
     if (!image) {
       throw new ContainerWriteError(
@@ -98,10 +104,13 @@ export async function writeVisionArchive({
       );
     }
     assertVisionImageIdentity(entry.source, image);
-    return safeByteSum(total, sourceSize(image.source));
-  }, 0);
-  const totalBytes = safeByteSum(jsonBytes, imageBytes);
-  const totalFiles = built.imageEntries.length + 1;
+    return sourceSize(image.source);
+  });
+  const totalBytes = assertContainerArchiveLimits(
+    totalFiles,
+    [jsonBytes, ...imageSizes],
+    [jsonBytes],
+  );
   const output = await createZipDestination(
     destination,
     totalBytes + 4096,
@@ -235,6 +244,7 @@ export async function writeSvpaArchive({
     imageByIndex,
     signal,
   );
+  const totalFiles = containerArchiveEntryCount("svpa", imageGroups.length);
 
   const folders = packageFolders(language);
   const assignedPaths = assignSvpaImagePaths(imageGroups, folders.images);
@@ -244,6 +254,7 @@ export async function writeSvpaArchive({
     {
       SchemaVersion: 1,
       Generator: "SaigeVision Project Converter",
+      GeneratorVersion: APP_VERSION,
       ProjectFile: projectEntryName,
       OriginalProjectDirectory: originalProjectDirectory,
       Entries: imageGroups.map((group) => ({
@@ -257,15 +268,16 @@ export async function writeSvpaArchive({
   const readme = packageReadme(language, projectFileName);
   const helperBlob = helper ?? (await loadHelper(signal));
   throwIfAborted(signal);
-  const imageBytes = imageGroups.reduce((total, group) => {
-    return safeByteSum(total, sourceSize(group.source));
-  }, 0);
-  const textBytes = [srprojXml, manifest, readme].reduce(
-    (total, value) => safeByteSum(total, utf8Size(value)),
-    0,
+  const textEntrySizes = [srprojXml, manifest, readme].map(utf8Size);
+  const totalBytes = assertContainerArchiveLimits(
+    totalFiles,
+    [
+      ...textEntrySizes,
+      ...imageGroups.map((group) => sourceSize(group.source)),
+      helperBlob.size,
+    ],
+    textEntrySizes,
   );
-  const totalBytes = [imageBytes, textBytes, helperBlob.size].reduce(safeByteSum, 0);
-  const totalFiles = imageGroups.length + 4;
   const output = await createZipDestination(
     destination,
     totalBytes + 8192,
@@ -439,6 +451,94 @@ async function addBinaryEntry(
 
 function sourceSize(source: BinarySource): number {
   return source.kind === "blob" ? source.blob.size : source.size;
+}
+
+/**
+ * Validate the exact uncompressed resource plan that the archive writer will
+ * emit. This mirrors the limits enforced when the generated archive is read
+ * back, so a successful write cannot create an archive rejected by our loader.
+ */
+export function assertContainerArchiveLimits(
+  totalFiles: number,
+  entrySizes: readonly number[],
+  textEntrySizes: readonly number[] = [],
+): number {
+  assertContainerEntryCount(totalFiles);
+  if (entrySizes.length !== totalFiles) {
+    throw new ContainerWriteError(
+      "OUTPUT_ARCHIVE_ENTRY_COUNT_MISMATCH",
+      "归档资源计划中的条目数量不一致。",
+    );
+  }
+
+  for (const size of textEntrySizes) {
+    assertValidEntrySize(size);
+    if (size > BROWSER_ARCHIVE_LIMITS.maxTextBytes) {
+      throw new ContainerWriteError(
+        "OUTPUT_ARCHIVE_TEXT_ENTRY_LIMIT_EXCEEDED",
+        `归档文本条目超过 ${BROWSER_ARCHIVE_LIMITS.maxTextBytes} 字节安全上限。`,
+      );
+    }
+  }
+
+  let totalBytes = 0;
+  for (const size of entrySizes) {
+    assertValidEntrySize(size);
+    if (size > BROWSER_ARCHIVE_LIMITS.maxEntryBytes) {
+      throw new ContainerWriteError(
+        "OUTPUT_ARCHIVE_ENTRY_SIZE_LIMIT_EXCEEDED",
+        `归档条目超过 ${BROWSER_ARCHIVE_LIMITS.maxEntryBytes} 字节安全上限。`,
+      );
+    }
+    totalBytes = safeByteSum(totalBytes, size);
+    if (totalBytes > BROWSER_ARCHIVE_LIMITS.maxTotalBytes) {
+      throw new ContainerWriteError(
+        "OUTPUT_ARCHIVE_TOTAL_SIZE_LIMIT_EXCEEDED",
+        `归档未压缩总大小超过 ${BROWSER_ARCHIVE_LIMITS.maxTotalBytes} 字节安全上限。`,
+      );
+    }
+  }
+  return totalBytes;
+}
+
+export function containerArchiveEntryCount(
+  format: "vision" | "svpa",
+  imageEntryCount: number,
+): number {
+  if (!Number.isSafeInteger(imageEntryCount) || imageEntryCount < 0) {
+    throw new ContainerWriteError(
+      "OUTPUT_ARCHIVE_ENTRY_COUNT_INVALID",
+      "归档图片条目数量无效。",
+    );
+  }
+  const fixedEntryCount = format === "vision" ? 1 : 4;
+  const totalFiles = imageEntryCount + fixedEntryCount;
+  assertContainerEntryCount(totalFiles);
+  return totalFiles;
+}
+
+function assertContainerEntryCount(totalFiles: number): void {
+  if (!Number.isSafeInteger(totalFiles) || totalFiles < 0) {
+    throw new ContainerWriteError(
+      "OUTPUT_ARCHIVE_ENTRY_COUNT_INVALID",
+      "归档条目数量无效。",
+    );
+  }
+  if (totalFiles > BROWSER_ARCHIVE_LIMITS.maxEntries) {
+    throw new ContainerWriteError(
+      "OUTPUT_ARCHIVE_ENTRY_LIMIT_EXCEEDED",
+      `归档条目数超过 ${BROWSER_ARCHIVE_LIMITS.maxEntries} 项安全上限。`,
+    );
+  }
+}
+
+function assertValidEntrySize(size: number): void {
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new ContainerWriteError(
+      "OUTPUT_ARCHIVE_ENTRY_SIZE_INVALID",
+      "归档条目大小无效。",
+    );
+  }
 }
 
 interface SvpaImageGroup {

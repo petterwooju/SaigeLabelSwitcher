@@ -159,6 +159,10 @@ test("parses a valid .visionproj using supplied entry names and bytes", () => {
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.project.project.type, "detection");
+  assert.equal(result.compatibility.status, "blocked");
+  assert.ok(
+    result.diagnostics.some((item) => item.code === "V2_PROJECT_TYPE_UNSUPPORTED"),
+  );
   assert.equal(result.project.files[0]?.image.kind, "archive");
   const image = result.project.files[0]?.image;
   assert.ok(image?.kind === "archive");

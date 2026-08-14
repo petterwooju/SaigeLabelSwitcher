@@ -13,6 +13,7 @@ import type {
   ProjectIR,
   ProjectParseResult,
 } from "../lib/model/project.ts";
+import { V2_PROJECT_LIMITS } from "../lib/security/resourceLimits.ts";
 
 interface MutableSegmentationProject {
   readonly project: {
@@ -130,6 +131,60 @@ function asBrowserFile(bytes: Uint8Array, name: string): File {
     name,
   ) as unknown as File;
 }
+
+function largeOuterRing(length: number): readonly (readonly [number, number])[] {
+  return Array.from({ length }, (_, index) => {
+    if (index === 0) return [0, 0] as const;
+    if (index === 1) return [10, 0] as const;
+    if (index === length - 1) return [0, 10] as const;
+    return [10, 10] as const;
+  });
+}
+
+test("fails fast when contour points are individually valid but exceed the project total", () => {
+  const fixture = segmentationProject();
+  const baseLabel = (firstFile(fixture).labelDataList as Array<Record<string, unknown>>)[0]!;
+  firstFile(fixture).labelDataList = [
+    {
+      ...baseLabel,
+      labelId: 10,
+      labelPosX: 0,
+      labelPosY: 0,
+      labelWidth: 10,
+      labelHeight: 10,
+      labelContour: JSON.stringify([
+        largeOuterRing(Math.floor(V2_PROJECT_LIMITS.maxContourPoints / 2) + 1),
+      ]),
+    },
+    {
+      ...baseLabel,
+      labelId: 11,
+      labelPosX: 0,
+      labelPosY: 0,
+      labelWidth: 10,
+      labelHeight: 10,
+      labelContour: JSON.stringify([
+        largeOuterRing(Math.ceil(V2_PROJECT_LIMITS.maxContourPoints / 2)),
+      ]),
+    },
+    {
+      ...baseLabel,
+      labelId: 12,
+      labelContour: "not-json",
+    },
+  ];
+
+  const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+  assert.equal(result.ok, false);
+  assert.equal(
+    result.diagnostics.filter((item) => item.code === "V2_CONTOUR_POINT_LIMIT_EXCEEDED").length,
+    1,
+  );
+  assert.equal(
+    result.diagnostics.some((item) => item.code === "V2_CONTOUR_INVALID_JSON"),
+    false,
+  );
+});
 
 test("parses native-style multi-ring Segmentation contours with signed ring roles", () => {
   const result = parseV2SubvisionProject({

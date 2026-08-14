@@ -93,6 +93,11 @@ test("localizes permission fallbacks, save picker descriptions, and raw diagnost
   assert.equal((converter.match(/helperUnsigned:/g) ?? []).length, 3);
   assert.match(converter, /target === "svpa-zip"[\s\S]*?SVPA_HELPER_UNSIGNED/);
   assert.match(converter, /if \(language === "en"\) return item\.message/);
+  assert.equal((converter.match(/imageDimensionsMismatch:/g) ?? []).length, 3);
+  assert.equal((converter.match(/imageFormatUnsupported:/g) ?? []).length, 3);
+  assert.match(converter, /localized \?\? copy\.saveFailed/);
+  assert.match(converter, /V2_EXTERNAL_PATH_RELATIVE/);
+  assert.match(converter, /relativePathConfirmation/);
 });
 
 test("uses per-instance heading ids and focuses meaningful state transitions", async () => {

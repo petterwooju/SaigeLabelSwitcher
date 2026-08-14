@@ -346,6 +346,7 @@ function parseSvpaManifest(text: string, archive: OpenArchive): SvpaManifest {
       ),
       originalProjectDirectory || undefined,
       "SVPA_ORIGINAL_PATH_INVALID",
+      true,
     );
     const relativePath = safeManifestArchivePath(
       requiredString(
@@ -411,6 +412,7 @@ function bindSvpaImages(
       file.sourcePath,
       manifest.OriginalProjectDirectory || undefined,
       "SVPA_PROJECT_IMAGE_PATH_UNSAFE",
+      true,
     );
     const key = canonicalExternalPath(normalizedSourcePath);
     const entry = entriesByOriginalPath.get(key);
@@ -580,12 +582,18 @@ function normalizeExternalPath(
   value: string,
   baseDirectory: string | undefined,
   code: string,
+  allowUnresolvedRelativeParent = false,
 ): string {
   const parsed = parseExternalPath(value, code);
-  if (!parsed.absolute && !baseDirectory && parsed.segments.includes("..")) {
+  if (
+    !parsed.absolute &&
+    !baseDirectory &&
+    parsed.segments.includes("..") &&
+    !allowUnresolvedRelativeParent
+  ) {
     throw new ProjectLoadError(
       code,
-      "Relative parent traversal requires a trusted original project directory.",
+      "Relative parent segments require a trusted original project directory in this context.",
       { path: value },
     );
   }

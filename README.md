@@ -2,6 +2,8 @@
 
 SaigeVision V1 / V2 项目文件的纯浏览器双向转换 Webapp。项目、标注和图片只在用户浏览器本机读取与写入，不经过服务器。
 
+> 当前发布：`v0.0.1`。本版本只开放经过真实样本验证的 `Classification` 和多边形 `Segmentation`；其他项目类型留待后续版本。
+
 ## 当前支持
 
 已开放并经过真实样本与 round-trip 测试的项目类型：`Classification`、多边形 `Segmentation`（含多轮廓与孔洞）。
@@ -27,8 +29,10 @@ Segmentation 当前支持 V1 `Contours` 与 V2 `labelContour` 多边形，按环
 
 ## 本地运行
 
+需要 Node.js 22.13 或更高版本。
+
 ```powershell
-npm.cmd install
+npm.cmd ci
 npm.cmd run dev
 ```
 

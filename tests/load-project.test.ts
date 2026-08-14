@@ -367,7 +367,7 @@ test("normalizes drive and UNC file URLs in SVPA manifests", async () => {
   }
 });
 
-test("rejects unresolved relative parent traversal without a project directory", async () => {
+test("loads a self-contained SVPA that uses the repair helper's raw relative parent mapping", async () => {
   const manifest = svpaManifest({
     OriginalProjectDirectory: "",
     Entries: [{ OriginalPath: "../outside.png", RelativePath: "图像/outside.png" }],
@@ -377,12 +377,14 @@ test("rejects unresolved relative parent traversal without a project directory",
     ["项目/demo.srproj", srprojForPaths(["../outside.png"])],
     ["图像/outside.png", "image"],
   ]);
-  await assert.rejects(
-    loadProject(browserFile([zip], "relative-parent.zip")),
-    (error: unknown) =>
-      error instanceof ProjectLoadError &&
-      error.code === "SVPA_ORIGINAL_PATH_INVALID",
-  );
+  const loaded = await loadProject(browserFile([zip], "relative-parent.zip"));
+  try {
+    assert.equal(loaded.parseResult.ok, true);
+    assert.equal(loaded.project?.files[0]?.sourcePath, "../outside.png");
+    assert.equal(loaded.project?.files[0]?.image.kind, "archive");
+  } finally {
+    await loaded.close();
+  }
 });
 
 test("uses content despite an extension mismatch and adds a warning", async () => {

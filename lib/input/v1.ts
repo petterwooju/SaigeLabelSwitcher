@@ -15,6 +15,7 @@ import type {
   ProjectType,
   SplitType,
 } from "../model/project.ts";
+import { isSupportedProjectType } from "../release.ts";
 import {
   appendBoundedProjectDiagnostic,
   exceedsUtf8ByteLimit,
@@ -189,7 +190,7 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
   }
 
   const type = normalizeProjectType(rawType);
-  if (type !== "classification" && type !== "segmentation") {
+  if (!isSupportedProjectType(type)) {
     compatibility(context, {
       code: "V1_PROJECT_TYPE_UNSUPPORTED",
       severity: "error",
@@ -198,7 +199,7 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
       message:
         type === "unknown"
           ? `V1 project type '${rawType}' is unknown.`
-          : `V1 ${rawType} parsing currently preserves only the common project skeleton; its labels are not mapped.`,
+          : `V1 ${rawType} is outside the v0.0.1 release scope; its labels are not mapped.`,
       details: { rawProjectType: rawType },
     });
   }

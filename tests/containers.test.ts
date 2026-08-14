@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { File as NodeFile } from "node:buffer";
 import test from "node:test";
-import { openValidatedZip } from "../lib/archive/zip.ts";
+import { openValidatedZip, type OpenArchive } from "../lib/archive/zip.ts";
+import { loadProject } from "../lib/input/loadProject.ts";
 import type { ProjectFileIR, ProjectIR } from "../lib/model/project.ts";
 import {
+  assertContainerArchiveLimits,
+  containerArchiveEntryCount,
   ContainerWriteError,
   writeSvpaArchive,
   writeVisionArchive,
@@ -10,11 +14,14 @@ import {
 import type { FileSystemSaveHandle } from "../lib/output/save.ts";
 import { writeSrproj } from "../lib/output/srproj.ts";
 import { writeV2VisionProject } from "../lib/output/v2.ts";
+import { BROWSER_ARCHIVE_LIMITS } from "../lib/security/resourceLimits.ts";
 
 class MemorySaveHandle implements FileSystemSaveHandle {
   private chunks: ArrayBuffer[] = [];
+  writableCalls = 0;
 
   async createWritable(): Promise<WritableStream<Uint8Array>> {
+    this.writableCalls += 1;
     return new WritableStream<Uint8Array>({
       write: (chunk) => {
         const copy = new Uint8Array(chunk.byteLength);
@@ -27,6 +34,98 @@ class MemorySaveHandle implements FileSystemSaveHandle {
   blob(type = "application/zip"): Blob {
     return new Blob(this.chunks, { type });
   }
+}
+
+test("container resource preflight mirrors archive reader boundaries", () => {
+  const limits = BROWSER_ARCHIVE_LIMITS;
+  assert.equal(
+    containerArchiveEntryCount("vision", limits.maxEntries - 1),
+    limits.maxEntries,
+  );
+  assert.equal(
+    containerArchiveEntryCount("svpa", limits.maxEntries - 4),
+    limits.maxEntries,
+  );
+  for (const [format, imageEntries] of [
+    ["vision", limits.maxEntries],
+    ["svpa", limits.maxEntries - 3],
+  ] as const) {
+    assert.throws(
+      () => containerArchiveEntryCount(format, imageEntries),
+      (error: unknown) =>
+        error instanceof ContainerWriteError &&
+        error.code === "OUTPUT_ARCHIVE_ENTRY_LIMIT_EXCEEDED",
+    );
+  }
+
+  assert.equal(
+    assertContainerArchiveLimits(
+      limits.maxEntries,
+      new Array<number>(limits.maxEntries).fill(0),
+    ),
+    0,
+  );
+  assert.throws(
+    () =>
+      assertContainerArchiveLimits(
+        limits.maxEntries + 1,
+        new Array<number>(limits.maxEntries + 1).fill(0),
+      ),
+    (error: unknown) =>
+      error instanceof ContainerWriteError &&
+      error.code === "OUTPUT_ARCHIVE_ENTRY_LIMIT_EXCEEDED",
+  );
+
+  assert.equal(
+    assertContainerArchiveLimits(
+      8,
+      new Array<number>(8).fill(limits.maxEntryBytes),
+    ),
+    limits.maxTotalBytes,
+  );
+  assert.throws(
+    () => assertContainerArchiveLimits(1, [limits.maxEntryBytes + 1]),
+    (error: unknown) =>
+      error instanceof ContainerWriteError &&
+      error.code === "OUTPUT_ARCHIVE_ENTRY_SIZE_LIMIT_EXCEEDED",
+  );
+  assert.throws(
+    () =>
+      assertContainerArchiveLimits(9, [
+        ...new Array<number>(8).fill(limits.maxEntryBytes),
+        1,
+      ]),
+    (error: unknown) =>
+      error instanceof ContainerWriteError &&
+      error.code === "OUTPUT_ARCHIVE_TOTAL_SIZE_LIMIT_EXCEEDED",
+  );
+
+  assert.equal(
+    assertContainerArchiveLimits(
+      1,
+      [limits.maxTextBytes],
+      [limits.maxTextBytes],
+    ),
+    limits.maxTextBytes,
+  );
+  assert.throws(
+    () =>
+      assertContainerArchiveLimits(
+        1,
+        [limits.maxTextBytes + 1],
+        [limits.maxTextBytes + 1],
+      ),
+    (error: unknown) =>
+      error instanceof ContainerWriteError &&
+      error.code === "OUTPUT_ARCHIVE_TEXT_ENTRY_LIMIT_EXCEEDED",
+  );
+});
+
+function browserFile(blob: Blob, name: string): File {
+  return new NodeFile(
+    [blob] as unknown as ConstructorParameters<typeof NodeFile>[0],
+    name,
+  ) as unknown as File;
 }
 
 function project(): ProjectIR {
@@ -138,6 +237,60 @@ test("vision container writes one root JSON and byte-identical images", async ()
   }
 });
 
+test("container writers reject oversized plans before opening the destination", async () => {
+  const source = project();
+  const built = writeV2VisionProject(source);
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+
+  const visionHandle = new MemorySaveHandle();
+  const tooManyVisionEntries = {
+    ...built,
+    imageEntries: new Array(BROWSER_ARCHIVE_LIMITS.maxEntries).fill(
+      built.imageEntries[0]!,
+    ),
+  };
+  await assert.rejects(
+    writeVisionArchive({
+      destination: { fileName: built.fileName, handle: visionHandle },
+      built: tooManyVisionEntries,
+      images: [],
+    }),
+    (error: unknown) =>
+      error instanceof ContainerWriteError &&
+      error.code === "OUTPUT_ARCHIVE_ENTRY_LIMIT_EXCEEDED",
+  );
+  assert.equal(visionHandle.writableCalls, 0);
+
+  const svpaHandle = new MemorySaveHandle();
+  const fakeArchive = {} as OpenArchive;
+  await assert.rejects(
+    writeSvpaArchive({
+      destination: { fileName: "oversized.zip", handle: svpaHandle },
+      project: source,
+      srprojXml: writeSrproj(source),
+      helper: new Blob([new Uint8Array([77, 90])]),
+      images: source.files.map((item, index) => ({
+        fileIndex: item.index,
+        originalPath: item.sourcePath,
+        source: {
+          kind: "archive" as const,
+          archive: fakeArchive,
+          entryName: `images/${index}.png`,
+          size:
+            index === 0
+              ? BROWSER_ARCHIVE_LIMITS.maxEntryBytes + 1
+              : 0,
+        },
+      })),
+    }),
+    (error: unknown) =>
+      error instanceof ContainerWriteError &&
+      error.code === "OUTPUT_ARCHIVE_ENTRY_SIZE_LIMIT_EXCEEDED",
+  );
+  assert.equal(svpaHandle.writableCalls, 0);
+});
+
 test("SVPA container emits compatible manifest, project, images, readme and helper", async () => {
   const source = project();
   const handle = new MemorySaveHandle();
@@ -165,6 +318,8 @@ test("SVPA container emits compatible manifest, project, images, readme and help
     assert.equal(archive.has("使用说明.txt"), true);
     assert.equal(archive.has("一键修复并打开项目.exe"), true);
     const manifest = JSON.parse(await archive.readText("svpa_manifest.json"));
+    assert.equal(manifest.Generator, "SaigeVision Project Converter");
+    assert.equal(manifest.GeneratorVersion, "0.0.1");
     assert.equal(manifest.ProjectFile, "项目/双向.srproj");
     assert.equal(manifest.OriginalProjectDirectory, "C:\\original\\project");
     assert.equal(manifest.Entries.length, 2);
@@ -173,6 +328,39 @@ test("SVPA container emits compatible manifest, project, images, readme and help
     assert.equal(manifest.Entries[1].RelativePath, "图像/root_1/同名.png");
   } finally {
     await archive.close();
+  }
+});
+
+test("SVPA with raw parent-relative V1 paths can be loaded back and repaired", async () => {
+  const source = project();
+  const relative: ProjectIR = {
+    ...source,
+    files: [file(0, "../images/a.png", 0)],
+  };
+  const handle = new MemorySaveHandle();
+  await writeSvpaArchive({
+    destination: { fileName: "relative.svpa.zip", handle },
+    project: relative,
+    srprojXml: writeSrproj(relative),
+    helper: new Blob([new Uint8Array([77, 90])]),
+    images: [{
+      fileIndex: 0,
+      originalPath: "../images/a.png",
+      source: {
+        kind: "blob",
+        blob: new Blob([new Uint8Array([1, 2, 3])]),
+        relativePath: "images/a.png",
+      },
+    }],
+  });
+
+  const loaded = await loadProject(browserFile(handle.blob(), "relative.svpa.zip"));
+  try {
+    assert.equal(loaded.parseResult.ok, true);
+    assert.equal(loaded.project?.files[0]?.sourcePath, "../images/a.png");
+    assert.equal(loaded.project?.files[0]?.image.kind, "archive");
+  } finally {
+    await loaded.close();
   }
 });
 
