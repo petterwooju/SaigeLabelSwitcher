@@ -38,6 +38,14 @@ test("preserves save results and guards the complete image verification path", a
   assert.doesNotMatch(converter, /enrichProjectImageDimensions/);
   assert.match(shell, /result\.mode === "direct"/);
   assert.match(shell, /result\.fileName/);
+  assert.match(
+    converter,
+    /target === "svpa-zip"[\s\S]*?isBlobFallbackSafe\([\s\S]*?preparedResolution\.totalBytes \+ SVPA_BLOB_DOWNLOAD_RESERVE_BYTES/,
+  );
+  assert.match(
+    converter,
+    /requestSaveDestination\(fileName, saveType\(target, language\), \{[\s\S]*?preferDownload,/,
+  );
 });
 
 test("keeps language, parse failure, dimension-only copy, and save-picker busy state explicit", async () => {
@@ -83,6 +91,13 @@ test("localizes permission fallbacks, save picker descriptions, and raw diagnost
 
   assert.equal((converter.match(/directoryPermissionFallback:/g) ?? []).length, 3);
   assert.equal((converter.match(/savePickerDownloadFallback:/g) ?? []).length, 3);
+  assert.equal((converter.match(/helperLoadFailed:/g) ?? []).length, 3);
+  assert.equal((converter.match(/helperIntegrityFailed:/g) ?? []).length, 3);
+  assert.match(converter, /case "HELPER_LOAD_FAILED": return copy\.helperLoadFailed/);
+  assert.match(
+    converter,
+    /case "HELPER_INTEGRITY_FAILED": return copy\.helperIntegrityFailed/,
+  );
   assert.match(converter, /isPermissionFallbackError\(error\)/);
   assert.match(converter, /saveType\(target, language\)/);
   assert.match(converter, /satisfies Record<ConverterLanguage, Record<ConverterOutputFormat, string>>/);

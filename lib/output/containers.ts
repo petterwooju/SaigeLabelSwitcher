@@ -903,10 +903,19 @@ function packageReadme(language: AppLanguage, projectFileName: string): string {
 }
 
 async function loadHelper(signal?: AbortSignal): Promise<Blob> {
-  const response = await fetch(
-    `/downloads/SaigeVisionProjectAssistant.ZipFixer.exe?sha256=${EXPECTED_HELPER_SHA256}`,
-    { cache: "force-cache", signal },
-  );
+  let response: Response;
+  try {
+    response = await fetch(
+      `/downloads/SaigeVisionProjectAssistant.ZipFixer.exe?sha256=${EXPECTED_HELPER_SHA256}`,
+      { cache: "force-cache", signal },
+    );
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new ContainerWriteError(
+      "HELPER_LOAD_FAILED",
+      "无法读取路径修复工具，请检查网络连接后重试。",
+    );
+  }
   if (!response.ok) {
     throw new ContainerWriteError(
       "HELPER_LOAD_FAILED",

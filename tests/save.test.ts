@@ -4,6 +4,7 @@ import {
   BrowserCapabilityError,
   createZipDestination,
   ensureBlobFallbackIsSafe,
+  isBlobFallbackSafe,
   requiresZip64,
   requestSaveDestination,
   saveBlob,
@@ -21,6 +22,14 @@ test("large Blob fallback is blocked before allocation", () => {
       error instanceof BrowserCapabilityError &&
       error.code === "BLOB_FALLBACK_TOO_LARGE",
   );
+});
+
+test("Blob fallback boundary can be checked without throwing", () => {
+  assert.equal(isBlobFallbackSafe(0), true);
+  assert.equal(isBlobFallbackSafe(500 * 1024 ** 2), true);
+  assert.equal(isBlobFallbackSafe(500 * 1024 ** 2 + 1), false);
+  assert.equal(isBlobFallbackSafe(-1), false);
+  assert.equal(isBlobFallbackSafe(Number.POSITIVE_INFINITY), false);
 });
 
 test("direct Blob save streams without materializing arrayBuffer", async () => {
@@ -104,6 +113,38 @@ test("save picker capability failures fall back to browser download", async () =
       extensions: [".srproj"],
     });
     assert.deepEqual(destination, { fileName: "project.srproj" });
+  } finally {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: originalWindow,
+    });
+  }
+});
+
+test("preferred browser download does not create a save-picker placeholder", async () => {
+  const originalWindow = globalThis.window;
+  let pickerCalls = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      showSaveFilePicker: async () => {
+        pickerCalls += 1;
+        throw new Error("the picker must not open");
+      },
+    },
+  });
+  try {
+    const destination = await requestSaveDestination(
+      "project.zip",
+      {
+        description: "SaigeVision project package",
+        mimeType: "application/zip",
+        extensions: [".zip"],
+      },
+      { preferDownload: true },
+    );
+    assert.deepEqual(destination, { fileName: "project.zip" });
+    assert.equal(pickerCalls, 0);
   } finally {
     Object.defineProperty(globalThis, "window", {
       configurable: true,
