@@ -312,6 +312,8 @@ test("normalizes geometry-less structural OK markers with one aggregate diagnost
   const second = structuredClone(first);
   second.fileId = 8;
   second.filePath = String.raw`C:\images\normal-2.png`;
+  delete second.classNo;
+  delete second.className;
   (fixture.project.projectFiles as Array<Record<string, unknown>>).push(second);
 
   const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
@@ -334,6 +336,31 @@ test("normalizes geometry-less structural OK markers with one aggregate diagnost
         item.code === "V2_SEGMENTATION_NORMAL_CLASS_CONTOUR_CONFLICT",
     ),
     false,
+  );
+});
+
+test("rejects V2 contour coordinates outside the V1 safe numeric range", () => {
+  const fixture = segmentationProject();
+  const label = (
+    firstFile(fixture).labelDataList as Array<Record<string, unknown>>
+  )[0]!;
+  label.labelContour = JSON.stringify([
+    [
+      [0, 0],
+      [Number.MAX_SAFE_INTEGER + 1, 0],
+      [0, 10],
+    ],
+  ]);
+
+  const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (item) =>
+        item.code === "V2_POINT_COORDINATE_INVALID" &&
+        item.category === "validation" &&
+        item.disposition === "block",
+    ),
   );
 });
 

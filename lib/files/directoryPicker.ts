@@ -1,4 +1,8 @@
 import { normalizePath, pathComparisonKey } from "../security/paths.ts";
+import {
+  DEFAULT_SOURCE_SELECTION_MAX_FILES,
+  DEFAULT_SOURCE_SELECTION_MAX_TOTAL_BYTES,
+} from "./sourceSelectionLimits.ts";
 
 export interface PickedDirectoryFile {
   file: File;
@@ -14,8 +18,9 @@ export interface DirectoryReadOptions {
 }
 
 export const DEFAULT_DIRECTORY_MAX_DEPTH = 32;
-export const DEFAULT_DIRECTORY_MAX_FILES = 20_000;
-export const DEFAULT_DIRECTORY_MAX_TOTAL_BYTES = 32 * 1024 * 1024 * 1024;
+export const DEFAULT_DIRECTORY_MAX_FILES = DEFAULT_SOURCE_SELECTION_MAX_FILES;
+export const DEFAULT_DIRECTORY_MAX_TOTAL_BYTES =
+  DEFAULT_SOURCE_SELECTION_MAX_TOTAL_BYTES;
 
 export class DirectoryReadError extends Error {
   readonly code: string;
@@ -108,7 +113,7 @@ export function readWebkitDirectoryFiles(
   const files: PickedDirectoryFile[] = [];
   const state = { totalBytes: 0 };
   throwIfAborted(options.signal);
-  for (const file of Array.from(selected as ArrayLike<File>)) {
+  for (const file of iterableFiles(selected)) {
     throwIfAborted(options.signal);
     const relativePath = browserRelativePath(file);
     if (!relativePath || (options.includeFile && !options.includeFile(relativePath))) {
@@ -191,11 +196,22 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 function sortPickedFiles(files: PickedDirectoryFile[]): PickedDirectoryFile[] {
-  return files.sort((left, right) => {
-    const keyOrder = pathComparisonKey(left.relativePath).localeCompare(
-      pathComparisonKey(right.relativePath),
-      "en-US",
-    );
-    return keyOrder || left.relativePath.localeCompare(right.relativePath);
-  });
+  return files
+    .map((file) => ({ file, comparisonKey: pathComparisonKey(file.relativePath) }))
+    .sort((left, right) => {
+      const keyOrder = left.comparisonKey.localeCompare(
+        right.comparisonKey,
+        "en-US",
+      );
+      return keyOrder || left.file.relativePath.localeCompare(right.file.relativePath);
+    })
+    .map(({ file }) => file);
+}
+
+function iterableFiles(
+  selected: Iterable<File> | ArrayLike<File>,
+): Iterable<File> {
+  return Symbol.iterator in Object(selected)
+    ? (selected as Iterable<File>)
+    : Array.from(selected as ArrayLike<File>);
 }

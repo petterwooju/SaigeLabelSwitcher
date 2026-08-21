@@ -51,6 +51,8 @@ export class BrowserCapabilityError extends Error {
 }
 
 export const MAX_BLOB_FALLBACK_BYTES = 500 * 1024 ** 2;
+const ZIP_BASE_OVERHEAD_BYTES = 64 * 1024;
+const ZIP_ENTRY_OVERHEAD_BYTES = 512;
 
 export interface SaveDestinationOptions {
   /**
@@ -98,6 +100,7 @@ export async function saveBlob(
   signal?: AbortSignal,
 ): Promise<SaveResult> {
   throwIfAborted(signal);
+  assertNonEmptyOutput(blob.size);
   if (destination.handle) {
     const writable = await destination.handle.createWritable();
     try {
@@ -174,6 +177,7 @@ export async function createZipDestination(
           await writer.close();
           finalized = true;
         }
+        assertNonEmptyOutput(writtenBytes);
         return {
           fileName: destination.fileName,
           size: writtenBytes,
@@ -205,6 +209,7 @@ export async function createZipDestination(
       await writer.close();
       finalized = true;
       const blob = await blobWriter.getData();
+      assertNonEmptyOutput(blob.size);
       triggerBlobDownload(blob, destination.fileName);
       return {
         fileName: destination.fileName,
@@ -226,6 +231,37 @@ export function requiresZip64(estimatedBytes: number, estimatedEntries: number):
     throw new RangeError("Estimated ZIP entry count must be a non-negative safe integer.");
   }
   return estimatedBytes >= 0xffffffff || estimatedEntries >= 0xffff;
+}
+
+/**
+ * Conservative upper-bound estimate for a stored ZIP. It includes local and
+ * central-directory records, data descriptors, ZIP64 slack, entry names and a
+ * fixed end-record margin. This estimate is used for memory and ZIP64 routing;
+ * the actual result size is still measured while writing.
+ */
+export function estimateZipOutputBytes(
+  uncompressedBytes: number,
+  entryCount: number,
+  totalEntryNameBytes = 0,
+): number {
+  for (const [label, value] of [
+    ["uncompressed byte count", uncompressedBytes],
+    ["entry count", entryCount],
+    ["entry-name byte count", totalEntryNameBytes],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new RangeError(`ZIP ${label} must be a non-negative safe integer.`);
+    }
+  }
+  const estimate =
+    uncompressedBytes +
+    entryCount * ZIP_ENTRY_OVERHEAD_BYTES +
+    totalEntryNameBytes * 2 +
+    ZIP_BASE_OVERHEAD_BYTES;
+  if (!Number.isSafeInteger(estimate) || estimate < uncompressedBytes) {
+    throw new RangeError("Estimated ZIP output size exceeds the safe integer range.");
+  }
+  return estimate;
 }
 
 export function ensureBlobFallbackIsSafe(bytes: number): void {
@@ -255,6 +291,15 @@ function triggerBlobDownload(blob: Blob, fileName: string): void {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+function assertNonEmptyOutput(size: number): void {
+  if (!Number.isSafeInteger(size) || size <= 0) {
+    throw new BrowserCapabilityError(
+      "EMPTY_SAVE_RESULT",
+      "生成的项目文件为空，已停止保存。",
+    );
+  }
 }
 
 function isAbortError(error: unknown): boolean {

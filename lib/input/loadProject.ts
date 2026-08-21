@@ -173,7 +173,28 @@ async function loadArchiveProject(
         { manifestCount: manifestCandidates.length },
       );
     }
-    return loadSvpaProject(sourceFile, archive, manifestCandidates[0], signal);
+    const manifestEntryName = manifestCandidates[0];
+    const manifestText = await archive.readText(
+      manifestEntryName,
+      undefined,
+      signal,
+    );
+    throwIfAborted(signal);
+    // `svpa_manifest.json` is a conventional SVPA control filename, not a
+    // globally reserved V2 project name. A valid V2 project may itself be
+    // named `svpa_manifest`, in which case its sole root JSON entry has this
+    // filename. Prefer the V2 root discriminator only when no SVPA manifest
+    // fields are present; malformed or partial manifests still go through
+    // strict manifest validation instead of being silently reclassified.
+    if (!isV2ProjectDocumentNamedLikeManifest(manifestText)) {
+      return loadSvpaProject(
+        sourceFile,
+        archive,
+        manifestEntryName,
+        signal,
+        manifestText,
+      );
+    }
   }
 
   const rootJsonEntries = names.filter(
@@ -216,8 +237,11 @@ async function loadSvpaProject(
   archive: OpenArchive,
   manifestEntryName: string,
   signal?: AbortSignal,
+  manifestTextInput?: string,
 ): Promise<LoadedProject> {
-  const manifestText = await archive.readText(manifestEntryName, undefined, signal);
+  const manifestText =
+    manifestTextInput ??
+    (await archive.readText(manifestEntryName, undefined, signal));
   throwIfAborted(signal);
   const manifest = parseSvpaManifest(manifestText, archive);
   const projectXmlText = await archive.readText(
@@ -243,6 +267,21 @@ async function loadSvpaProject(
     svpaManifest: manifest,
     projectXmlText,
   });
+}
+
+function isV2ProjectDocumentNamedLikeManifest(text: string): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(stripBom(text));
+  } catch {
+    return false;
+  }
+  if (!isJsonObject(value) || !isJsonObject(value.project)) return false;
+  return !(
+    "ProjectFile" in value ||
+    "OriginalProjectDirectory" in value ||
+    "Entries" in value
+  );
 }
 
 function parseSvpaManifest(text: string, archive: OpenArchive): SvpaManifest {

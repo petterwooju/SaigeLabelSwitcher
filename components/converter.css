@@ -855,6 +855,14 @@
   white-space: normal;
 }
 
+.converter-success__file > span {
+  display: block;
+  margin-top: 3px;
+  color: var(--converter-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .converter-visually-hidden {
   position: absolute !important;
   overflow: hidden !important;

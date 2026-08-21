@@ -6,8 +6,11 @@ import {
   lastPathSegment,
   normalizePath,
   pathComparisonKey,
-  trailingPathSegmentScore,
 } from "../security/paths.ts";
+import {
+  measureSourceSelectionUsage,
+  type SourceSelectionUsage,
+} from "./sourceSelectionLimits.ts";
 
 export interface ProjectImageReference {
   index: number;
@@ -41,13 +44,24 @@ export interface ArchiveSourceInput {
 
 const DIRECT_SELECTION_PREFIX = "direct-selection";
 
+/** Prevent diagnostics from retaining a large same-name candidate cross-product. */
+export const MAX_RETAINED_MATCH_CANDIDATES = 8;
+
+interface CandidateSuffixNode {
+  readonly children: Map<string, CandidateSuffixNode>;
+  readonly retainedCandidates: SelectedSourceFile[];
+  candidateCount: number;
+}
+
 export type ImageMatchStatus = "matched" | "missing" | "ambiguous" | "blank";
 
 export interface ImagePathMatch {
   projectPath: ProjectImageReference;
   status: ImageMatchStatus;
   selectedFile?: SelectedSourceFile;
-  candidates: SelectedSourceFile[];
+  /** A bounded diagnostic sample. Use candidateCount for the exact total. */
+  candidates: readonly SelectedSourceFile[];
+  candidateCount: number;
   score: number;
 }
 
@@ -81,26 +95,30 @@ export function createProjectImageReferences(
   paths: Iterable<string>,
 ): ProjectImageReferenceSet {
   const references: ProjectImageReference[] = [];
+  const nonBlankKeys = new Set<string>();
   let blankPathCount = 0;
+  let duplicateReferenceCount = 0;
+  let index = 0;
 
-  Array.from(paths).forEach((originalValue, index) => {
+  for (const originalValue of paths) {
     const originalPath = stripProjectPathQuotes(originalValue.trim());
     const normalizedPath = normalizePath(originalPath);
     const fileName = lastPathSegment(normalizedPath);
     if (!normalizedPath || !fileName) {
       blankPathCount += 1;
+    } else {
+      const key = pathComparisonKey(normalizedPath);
+      if (nonBlankKeys.has(key)) duplicateReferenceCount += 1;
+      else nonBlankKeys.add(key);
     }
     references.push({ index, originalPath, normalizedPath, fileName });
-  });
-
-  const nonBlankKeys = references
-    .filter((reference) => reference.normalizedPath.length > 0)
-    .map((reference) => pathComparisonKey(reference.normalizedPath));
+    index += 1;
+  }
 
   return {
     references,
     blankPathCount,
-    duplicateReferenceCount: nonBlankKeys.length - new Set(nonBlankKeys).size,
+    duplicateReferenceCount,
   };
 }
 
@@ -108,15 +126,17 @@ export function mergeSelectedFiles(
   current: readonly SelectedSourceFile[],
   files: Iterable<File>,
 ): SelectedSourceFile[] {
-  return mergeSelectedFileInputs(
-    current,
-    Array.from(files, (file) => ({
-      file,
-      relativePath:
-        (file as File & { readonly webkitRelativePath?: string })
-          .webkitRelativePath || file.name,
-    })),
-  );
+  function* sourceInputs(): Iterable<SourceFileInput> {
+    for (const file of files) {
+      yield {
+        file,
+        relativePath:
+          (file as File & { readonly webkitRelativePath?: string })
+            .webkitRelativePath || file.name,
+      };
+    }
+  }
+  return mergeSelectedFileInputs(current, sourceInputs());
 }
 
 export function mergePickedDirectoryFiles(
@@ -219,13 +239,18 @@ function nextDirectSelectionId(
 function sortSelectedFiles(
   files: Iterable<SelectedSourceFile>,
 ): SelectedSourceFile[] {
-  return Array.from(files).sort((left, right) => {
-    const keyOrder = pathComparisonKey(left.relativePath).localeCompare(
-      pathComparisonKey(right.relativePath),
-      "en-US",
-    );
-    return keyOrder || left.relativePath.localeCompare(right.relativePath);
-  });
+  return Array.from(files, (file) => ({
+    file,
+    comparisonKey: pathComparisonKey(file.relativePath),
+  }))
+    .sort((left, right) => {
+      const keyOrder = left.comparisonKey.localeCompare(
+        right.comparisonKey,
+        "en-US",
+      );
+      return keyOrder || left.file.relativePath.localeCompare(right.file.relativePath);
+    })
+    .map(({ file }) => file);
 }
 
 /**
@@ -240,92 +265,117 @@ export function matchImageFiles(
     ? projectPaths
     : createProjectImageReferences(projectPaths);
 
-  const byFileName = new Map<string, SelectedSourceFile[]>();
+  const byFileName = new Map<string, CandidateSuffixNode>();
   for (const selectedFile of selectedFiles) {
     const fileNameKey = pathComparisonKey(
       lastPathSegment(selectedFile.normalizedRelativePath),
     );
-    const bucket = byFileName.get(fileNameKey) ?? [];
-    bucket.push(selectedFile);
-    byFileName.set(fileNameKey, bucket);
+    if (!fileNameKey) continue;
+    let node = byFileName.get(fileNameKey);
+    if (!node) {
+      node = createCandidateSuffixNode();
+      byFileName.set(fileNameKey, node);
+    }
+    addCandidateToNode(node, selectedFile);
+    for (
+      let index = selectedFile.pathSegments.length - 2;
+      index >= 0;
+      index -= 1
+    ) {
+      node = candidateNodeChild(node, selectedFile.pathSegments[index]!);
+      addCandidateToNode(node, selectedFile);
+    }
   }
 
   const initialMatches = referenceSet.references.map<ImagePathMatch>((projectPath) => {
     if (!projectPath.normalizedPath || !projectPath.fileName) {
-      return { projectPath, status: "blank", candidates: [], score: 0 };
+      return {
+        projectPath,
+        status: "blank",
+        candidates: [],
+        candidateCount: 0,
+        score: 0,
+      };
     }
 
-    const candidates = byFileName.get(pathComparisonKey(projectPath.fileName)) ?? [];
-    if (candidates.length === 0) {
-      return { projectPath, status: "missing", candidates: [], score: 0 };
+    const root = byFileName.get(pathComparisonKey(projectPath.fileName));
+    if (!root) {
+      return {
+        projectPath,
+        status: "missing",
+        candidates: [],
+        candidateCount: 0,
+        score: 0,
+      };
     }
 
     const projectSegments = comparisonPathSegments(projectPath.normalizedPath);
-    const scored = candidates.map((candidate) => ({
-      candidate,
-      score: trailingPathSegmentScore(projectSegments, candidate.pathSegments),
-    }));
-    const bestScore = Math.max(...scored.map((item) => item.score));
-    const bestCandidates = scored
-      .filter((item) => item.score === bestScore)
-      .map((item) => item.candidate);
+    let bestNode = root;
+    let bestScore = 1;
+    for (let index = projectSegments.length - 2; index >= 0; index -= 1) {
+      const nextNode = bestNode.children.get(projectSegments[index]!);
+      if (!nextNode) break;
+      bestNode = nextNode;
+      bestScore += 1;
+    }
 
-    if (bestCandidates.length === 1) {
+    if (bestNode.candidateCount === 1) {
       return {
         projectPath,
         status: "matched",
-        selectedFile: bestCandidates[0],
-        candidates: bestCandidates,
+        selectedFile: bestNode.retainedCandidates[0],
+        candidates: bestNode.retainedCandidates,
+        candidateCount: 1,
         score: bestScore,
       };
     }
     return {
       projectPath,
       status: "ambiguous",
-      candidates: bestCandidates,
+      candidates: bestNode.retainedCandidates,
+      candidateCount: bestNode.candidateCount,
       score: bestScore,
     };
   });
 
   // A bare file selection has no parent directory information. Never allow one
   // selected binary to satisfy multiple distinct project paths silently.
-  const assignments = new Map<string, ImagePathMatch[]>();
+  const assignments = new Map<string, string | null>();
   for (const match of initialMatches) {
     if (match.status !== "matched" || !match.selectedFile) continue;
-    const bucket = assignments.get(match.selectedFile.id) ?? [];
-    bucket.push(match);
-    assignments.set(match.selectedFile.id, bucket);
-  }
-  const conflictingIds = new Set<string>();
-  for (const [selectedId, bucket] of assignments) {
-    const distinctPaths = new Set(
-      bucket.map((match) => pathComparisonKey(match.projectPath.normalizedPath)),
-    );
-    if (distinctPaths.size > 1) conflictingIds.add(selectedId);
+    const selectedId = match.selectedFile.id;
+    const pathKey = pathComparisonKey(match.projectPath.normalizedPath);
+    const assignedPath = assignments.get(selectedId);
+    if (assignedPath === undefined) assignments.set(selectedId, pathKey);
+    else if (assignedPath !== pathKey) assignments.set(selectedId, null);
   }
   const matches = initialMatches.map((match): ImagePathMatch => {
-    if (!match.selectedFile || !conflictingIds.has(match.selectedFile.id)) {
+    if (!match.selectedFile || assignments.get(match.selectedFile.id) !== null) {
       return match;
     }
     return {
       projectPath: match.projectPath,
       status: "ambiguous",
       candidates: [match.selectedFile],
+      candidateCount: 1,
       score: match.score,
     };
   });
 
-  const matched = matches.filter(
-    (match): match is ImagePathMatch & { selectedFile: SelectedSourceFile } =>
-      match.status === "matched" && match.selectedFile !== undefined,
-  );
-  const uniqueMatchedFiles = Array.from(
-    new Map(matched.map((match) => [match.selectedFile.id, match.selectedFile])).values(),
-  );
-  const matchedCount = matched.length;
-  const missingCount = countStatus(matches, "missing");
-  const ambiguousCount = countStatus(matches, "ambiguous");
-  const representedBlankCount = countStatus(matches, "blank");
+  const uniqueMatchedFileMap = new Map<string, SelectedSourceFile>();
+  let matchedCount = 0;
+  let missingCount = 0;
+  let ambiguousCount = 0;
+  let representedBlankCount = 0;
+  for (const match of matches) {
+    if (match.status === "matched" && match.selectedFile) {
+      matchedCount += 1;
+      uniqueMatchedFileMap.set(match.selectedFile.id, match.selectedFile);
+    } else if (match.status === "missing") missingCount += 1;
+    else if (match.status === "ambiguous") ambiguousCount += 1;
+    else if (match.status === "blank") representedBlankCount += 1;
+  }
+  const uniqueMatchedFiles = Array.from(uniqueMatchedFileMap.values());
   // Older parsers omitted blank paths from `paths` and reported only a count.
   // Honour both representations without counting an included blank twice.
   const blankPathCount = Math.max(
@@ -342,10 +392,7 @@ export function matchImageFiles(
     ambiguousCount,
     blankPathCount,
     uniqueMatchedFiles,
-    matchedBytes: uniqueMatchedFiles.reduce(
-      (sum, item) => sum + binarySourceSize(item.source),
-      0,
-    ),
+    matchedBytes: selectedSourceUsage(uniqueMatchedFiles).totalBytes,
     canPackage:
       totalCount > 0 &&
       matchedCount === totalCount &&
@@ -353,6 +400,19 @@ export function matchImageFiles(
       ambiguousCount === 0 &&
       blankPathCount === 0,
   };
+}
+
+/** Measure all currently retained image sources across repeated selections. */
+export function selectedSourceUsage(
+  selectedFiles: readonly SelectedSourceFile[],
+  openArchiveCount = 0,
+): SourceSelectionUsage {
+  function* byteSizes(): Iterable<number> {
+    for (const selectedFile of selectedFiles) {
+      yield binarySourceSize(selectedFile.source);
+    }
+  }
+  return measureSourceSelectionUsage(byteSizes(), openArchiveCount);
 }
 
 function binarySourceSize(source: BinarySource): number {
@@ -375,14 +435,29 @@ export function matchProjectFiles(
   );
 }
 
-function countStatus(
-  matches: readonly ImagePathMatch[],
-  status: ImageMatchStatus,
-): number {
-  return matches.reduce(
-    (count, match) => count + (match.status === status ? 1 : 0),
-    0,
-  );
+function createCandidateSuffixNode(): CandidateSuffixNode {
+  return { children: new Map(), retainedCandidates: [], candidateCount: 0 };
+}
+
+function candidateNodeChild(
+  node: CandidateSuffixNode,
+  segment: string,
+): CandidateSuffixNode {
+  const existing = node.children.get(segment);
+  if (existing) return existing;
+  const child = createCandidateSuffixNode();
+  node.children.set(segment, child);
+  return child;
+}
+
+function addCandidateToNode(
+  node: CandidateSuffixNode,
+  candidate: SelectedSourceFile,
+): void {
+  node.candidateCount += 1;
+  if (node.retainedCandidates.length < MAX_RETAINED_MATCH_CANDIDATES) {
+    node.retainedCandidates.push(candidate);
+  }
 }
 
 function isReferenceSet(

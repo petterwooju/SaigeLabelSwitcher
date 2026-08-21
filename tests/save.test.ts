@@ -4,6 +4,7 @@ import {
   BrowserCapabilityError,
   createZipDestination,
   ensureBlobFallbackIsSafe,
+  estimateZipOutputBytes,
   isBlobFallbackSafe,
   requiresZip64,
   requestSaveDestination,
@@ -94,6 +95,38 @@ test("ZIP64 selection covers byte and entry-count boundaries", () => {
   assert.equal(requiresZip64(1, 0xffff), true);
   assert.throws(() => requiresZip64(-1, 1), RangeError);
   assert.throws(() => requiresZip64(1, Number.MAX_VALUE), RangeError);
+});
+
+test("ZIP estimates include per-entry, name and end-record overhead", () => {
+  const estimate = estimateZipOutputBytes(1000, 10, 200);
+  assert.ok(estimate > 1000 + 10 * 100 + 200);
+  assert.throws(() => estimateZipOutputBytes(-1, 1), RangeError);
+  assert.throws(
+    () => estimateZipOutputBytes(Number.MAX_SAFE_INTEGER, 1),
+    RangeError,
+  );
+});
+
+test("empty Blob outputs are rejected before opening a destination", async () => {
+  let opened = false;
+  await assert.rejects(
+    saveBlob(
+      {
+        fileName: "empty.bin",
+        handle: {
+          createWritable: async () => {
+            opened = true;
+            return new WritableStream<Uint8Array>();
+          },
+        },
+      },
+      new Blob([]),
+    ),
+    (error: unknown) =>
+      error instanceof BrowserCapabilityError &&
+      error.code === "EMPTY_SAVE_RESULT",
+  );
+  assert.equal(opened, false);
 });
 
 test("save picker capability failures fall back to browser download", async () => {

@@ -13,7 +13,8 @@ import {
   EXPECTED_HELPER_SHA256,
 } from "../security/helperIntegrity.ts";
 import type { SaveDestination, SaveResult } from "./save.ts";
-import { createZipDestination } from "./save.ts";
+import { createZipDestination, estimateZipOutputBytes } from "./save.ts";
+import { safeOutputStem } from "./fileNames.ts";
 import type { V2VisionWriteSuccess } from "./v2.ts";
 
 export type AppLanguage = "zh-CN" | "en-US" | "ko-KR";
@@ -58,6 +59,13 @@ export interface VisionArchiveOptions {
   readonly signal?: AbortSignal;
 }
 
+export interface PreparedVisionArchive {
+  readonly built: V2VisionWriteSuccess;
+  readonly images: readonly ResolvedProjectImage[];
+  readonly estimatedBytes: number;
+  readonly archivePlan: VisionArchivePlan;
+}
+
 export interface SvpaArchiveOptions {
   readonly destination: SaveDestination;
   readonly project: ProjectIR;
@@ -69,6 +77,17 @@ export interface SvpaArchiveOptions {
   readonly helper?: Blob;
   readonly onProgress?: (progress: ContainerProgress) => void;
   readonly signal?: AbortSignal;
+}
+
+export interface PreparedSvpaArchive {
+  readonly project: ProjectIR;
+  readonly srprojXml: string;
+  readonly images: readonly ResolvedProjectImage[];
+  readonly language: AppLanguage;
+  readonly originalProjectDirectory: string;
+  readonly helper: Blob;
+  readonly estimatedBytes: number;
+  readonly archivePlan: SvpaArchivePlan;
 }
 
 export class ContainerWriteError extends Error {
@@ -89,31 +108,52 @@ export async function writeVisionArchive({
   signal,
 }: VisionArchiveOptions): Promise<SaveResult> {
   throwIfAborted(signal);
+  const prepared = prepareVisionArchive({ built, images });
+  return writePreparedVisionArchive({
+    destination,
+    prepared,
+    onProgress,
+    signal,
+  });
+}
+
+export function prepareVisionArchive({
+  built,
+  images,
+}: Pick<VisionArchiveOptions, "built" | "images">): PreparedVisionArchive {
+  const plan = visionArchivePlan(built, images);
+  return {
+    built,
+    images: [...images],
+    estimatedBytes: plan.estimatedBytes,
+    archivePlan: plan,
+  };
+}
+
+export async function writePreparedVisionArchive({
+  destination,
+  prepared,
+  onProgress,
+  signal,
+}: {
+  readonly destination: SaveDestination;
+  readonly prepared: PreparedVisionArchive;
+  readonly onProgress?: (progress: ContainerProgress) => void;
+  readonly signal?: AbortSignal;
+}): Promise<SaveResult> {
+  throwIfAborted(signal);
+  const { built } = prepared;
+  const plan = prepared.archivePlan;
   const totalFiles = containerArchiveEntryCount(
     "vision",
     built.imageEntries.length,
   );
-  const imageByIndex = uniqueImagesByIndex(images);
+  const imageByIndex = plan.imageByIndex;
   const jsonBytes = utf8Size(built.projectJsonText);
-  const imageSizes = built.imageEntries.map((entry) => {
-    const image = imageByIndex.get(entry.fileIndex);
-    if (!image) {
-      throw new ContainerWriteError(
-        "VISION_IMAGE_MISSING",
-        `缺少项目图片（索引 ${entry.fileIndex}）。`,
-      );
-    }
-    assertVisionImageIdentity(entry.source, image);
-    return sourceSize(image.source);
-  });
-  const totalBytes = assertContainerArchiveLimits(
-    totalFiles,
-    [jsonBytes, ...imageSizes],
-    [jsonBytes],
-  );
+  const totalBytes = plan.totalBytes;
   const output = await createZipDestination(
     destination,
-    totalBytes + 4096,
+    plan.estimatedBytes,
     totalFiles,
     signal,
   );
@@ -125,7 +165,6 @@ export async function writeVisionArchive({
       output.writer,
       built.projectJsonEntryName,
       built.projectJsonText,
-      6,
       (loaded) =>
         emitProgress(
           onProgress,
@@ -185,6 +224,50 @@ export async function writeVisionArchive({
   }
 }
 
+interface VisionArchivePlan {
+  readonly imageByIndex: ReadonlyMap<number, ResolvedProjectImage>;
+  readonly totalBytes: number;
+  readonly estimatedBytes: number;
+}
+
+function visionArchivePlan(
+  built: V2VisionWriteSuccess,
+  images: readonly ResolvedProjectImage[],
+): VisionArchivePlan {
+  const totalFiles = containerArchiveEntryCount("vision", built.imageEntries.length);
+  const imageByIndex = uniqueImagesByIndex(images);
+  const jsonBytes = utf8Size(built.projectJsonText);
+  const imageSizes = built.imageEntries.map((entry) => {
+    const image = imageByIndex.get(entry.fileIndex);
+    if (!image) {
+      throw new ContainerWriteError(
+        "VISION_IMAGE_MISSING",
+        `缺少项目图片（索引 ${entry.fileIndex}）。`,
+      );
+    }
+    assertVisionImageIdentity(entry.source, image);
+    return sourceSize(image.source);
+  });
+  const totalBytes = assertContainerArchiveLimits(
+    totalFiles,
+    [jsonBytes, ...imageSizes],
+    [jsonBytes],
+  );
+  const names = [
+    built.projectJsonEntryName,
+    ...built.imageEntries.map((entry) => entry.entryName),
+  ];
+  return {
+    imageByIndex,
+    totalBytes,
+    estimatedBytes: estimateZipOutputBytes(
+      totalBytes,
+      totalFiles,
+      names.reduce((total, name) => safeByteSum(total, utf8Size(name)), 0),
+    ),
+  };
+}
+
 function assertVisionImageIdentity(
   expected: V2VisionWriteSuccess["imageEntries"][number]["source"],
   resolved: ResolvedProjectImage,
@@ -221,66 +304,83 @@ export async function writeSvpaArchive({
   onProgress,
   signal,
 }: SvpaArchiveOptions): Promise<SaveResult> {
-  throwIfAborted(signal);
-  const orderedFiles = [...project.files].sort(
-    (left, right) => left.index - right.index,
-  );
-  if (orderedFiles.length === 0) {
-    throw new ContainerWriteError(
-      "SVPA_EMPTY_PROJECT",
-      "空图片项目不能生成完整 SVPA 项目包。",
-    );
-  }
-  validateSrprojPathMultiset(srprojXml, orderedFiles);
-  const imageByIndex = uniqueImagesByIndex(images);
-  if (orderedFiles.length !== imageByIndex.size) {
-    throw new ContainerWriteError(
-      "SVPA_IMAGE_COUNT_MISMATCH",
-      "项目中的每一条图片引用都必须唯一匹配一张图片。",
-    );
-  }
-  const imageGroups = await groupSvpaImagesByOriginalPath(
-    orderedFiles,
-    imageByIndex,
+  const prepared = await prepareSvpaArchive({
+    project,
+    srprojXml,
+    images,
+    language,
+    originalProjectDirectory,
+    helper,
     signal,
-  );
-  const totalFiles = containerArchiveEntryCount("svpa", imageGroups.length);
+  });
+  return writePreparedSvpaArchive({
+    destination,
+    prepared,
+    onProgress,
+    signal,
+  });
+}
 
-  const folders = packageFolders(language);
-  const assignedPaths = assignSvpaImagePaths(imageGroups, folders.images);
-  const projectFileName = `${safeFileStem(project.project.name)}.srproj`;
-  const projectEntryName = `${folders.project}/${projectFileName}`;
-  const manifest = JSON.stringify(
-    {
-      SchemaVersion: 1,
-      Generator: "SaigeVision Project Converter",
-      GeneratorVersion: APP_VERSION,
-      ProjectFile: projectEntryName,
-      OriginalProjectDirectory: originalProjectDirectory,
-      Entries: imageGroups.map((group) => ({
-        OriginalPath: group.originalPath,
-        RelativePath: assignedPaths.get(group.key),
-      })),
-    },
-    undefined,
-    2,
-  );
-  const readme = packageReadme(language, projectFileName);
-  const helperBlob = helper ?? (await loadHelper(signal));
+export async function prepareSvpaArchive({
+  project,
+  srprojXml,
+  images,
+  language = "zh-CN",
+  originalProjectDirectory = "",
+  helper,
+  signal,
+}: Omit<SvpaArchiveOptions, "destination" | "onProgress">): Promise<PreparedSvpaArchive> {
+  const plan = await svpaArchivePlan({
+    project,
+    srprojXml,
+    images,
+    language,
+    originalProjectDirectory,
+    helper,
+    signal,
+  });
+  return {
+    project,
+    srprojXml,
+    images: [...images],
+    language,
+    originalProjectDirectory,
+    helper: plan.helperBlob,
+    estimatedBytes: plan.estimatedBytes,
+    archivePlan: plan,
+  };
+}
+
+export async function writePreparedSvpaArchive({
+  destination,
+  prepared,
+  onProgress,
+  signal,
+}: {
+  readonly destination: SaveDestination;
+  readonly prepared: PreparedSvpaArchive;
+  readonly onProgress?: (progress: ContainerProgress) => void;
+  readonly signal?: AbortSignal;
+}): Promise<SaveResult> {
   throwIfAborted(signal);
-  const textEntrySizes = [srprojXml, manifest, readme].map(utf8Size);
-  const totalBytes = assertContainerArchiveLimits(
+  const plan = prepared.archivePlan;
+  const {
+    srprojXml,
+    language,
+    imageGroups,
     totalFiles,
-    [
-      ...textEntrySizes,
-      ...imageGroups.map((group) => sourceSize(group.source)),
-      helperBlob.size,
-    ],
-    textEntrySizes,
-  );
+    folders,
+    assignedPaths,
+    projectEntryName,
+    manifest,
+    readme,
+    helperBlob,
+    totalBytes,
+    estimatedBytes,
+  } = plan;
   const output = await createZipDestination(
     destination,
-    totalBytes + 8192,
+    estimatedBytes,
     totalFiles,
     signal,
   );
@@ -293,7 +393,6 @@ export async function writeSvpaArchive({
       output.writer,
       name,
       text,
-      6,
       (loaded) =>
         emitProgress(
           onProgress,
@@ -376,6 +475,122 @@ export async function writeSvpaArchive({
   }
 }
 
+interface SvpaArchivePlan {
+  readonly srprojXml: string;
+  readonly language: AppLanguage;
+  readonly imageGroups: readonly SvpaImageGroup[];
+  readonly totalFiles: number;
+  readonly folders: ReturnType<typeof packageFolders>;
+  readonly assignedPaths: ReadonlyMap<string, string>;
+  readonly projectEntryName: string;
+  readonly manifest: string;
+  readonly readme: string;
+  readonly helperBlob: Blob;
+  readonly totalBytes: number;
+  readonly estimatedBytes: number;
+}
+
+async function svpaArchivePlan({
+  project,
+  srprojXml,
+  images,
+  language,
+  originalProjectDirectory,
+  helper,
+  signal,
+}: {
+  readonly project: ProjectIR;
+  readonly srprojXml: string;
+  readonly images: readonly ResolvedProjectImage[];
+  readonly language: AppLanguage;
+  readonly originalProjectDirectory: string;
+  readonly helper?: Blob;
+  readonly signal?: AbortSignal;
+}): Promise<SvpaArchivePlan> {
+  throwIfAborted(signal);
+  const orderedFiles = [...project.files].sort(
+    (left, right) => left.index - right.index,
+  );
+  if (orderedFiles.length === 0) {
+    throw new ContainerWriteError(
+      "SVPA_EMPTY_PROJECT",
+      "空图片项目不能生成完整 SVPA 项目包。",
+    );
+  }
+  validateSrprojPathMultiset(srprojXml, orderedFiles);
+  const imageByIndex = uniqueImagesByIndex(images);
+  if (orderedFiles.length !== imageByIndex.size) {
+    throw new ContainerWriteError(
+      "SVPA_IMAGE_COUNT_MISMATCH",
+      "项目中的每一条图片引用都必须唯一匹配一张图片。",
+    );
+  }
+  const imageGroups = await groupSvpaImagesByOriginalPath(
+    orderedFiles,
+    imageByIndex,
+    signal,
+  );
+  const totalFiles = containerArchiveEntryCount("svpa", imageGroups.length);
+
+  const folders = packageFolders(language);
+  const assignedPaths = assignSvpaImagePaths(imageGroups, folders.images);
+  const projectFileName = `${safeOutputStem(project.project.name)}.srproj`;
+  const projectEntryName = `${folders.project}/${projectFileName}`;
+  const manifest = JSON.stringify(
+    {
+      SchemaVersion: 1,
+      Generator: "SaigeVision Project Converter",
+      GeneratorVersion: APP_VERSION,
+      ProjectFile: projectEntryName,
+      OriginalProjectDirectory: originalProjectDirectory,
+      Entries: imageGroups.map((group) => ({
+        OriginalPath: group.originalPath,
+        RelativePath: assignedPaths.get(group.key),
+      })),
+    },
+    undefined,
+    2,
+  );
+  const readme = packageReadme(language, projectFileName);
+  const helperBlob = helper ?? (await loadHelper(signal));
+  throwIfAborted(signal);
+  const textEntrySizes = [srprojXml, manifest, readme].map(utf8Size);
+  const totalBytes = assertContainerArchiveLimits(
+    totalFiles,
+    [
+      ...textEntrySizes,
+      ...imageGroups.map((group) => sourceSize(group.source)),
+      helperBlob.size,
+    ],
+    textEntrySizes,
+  );
+  const entryNames = [
+    projectEntryName,
+    ...imageGroups.map((group) => assignedPaths.get(group.key) ?? ""),
+    "svpa_manifest.json",
+    readmeName(language),
+    folders.helper,
+  ];
+  return {
+    srprojXml,
+    language,
+    imageGroups,
+    totalFiles,
+    folders,
+    assignedPaths,
+    projectEntryName,
+    manifest,
+    readme,
+    helperBlob,
+    totalBytes,
+    estimatedBytes: estimateZipOutputBytes(
+      totalBytes,
+      totalFiles,
+      entryNames.reduce((total, name) => safeByteSum(total, utf8Size(name)), 0),
+    ),
+  };
+}
+
 function uniqueImagesByIndex(
   images: readonly ResolvedProjectImage[],
 ): ReadonlyMap<number, ResolvedProjectImage> {
@@ -396,13 +611,15 @@ async function addTextEntry(
   writer: ZipWriter<unknown>,
   name: string,
   value: string,
-  level: number,
   onProgress: (loaded: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   throwIfAborted(signal);
   await writer.add(name, new TextReader(value), {
-    level,
+    // Store generated XML/JSON without deflate compression. This guarantees
+    // that even highly repetitive output cannot violate the reader's
+    // anti-zip-bomb compression-ratio boundary.
+    level: 0,
     onprogress: (loaded) => onProgress(loaded),
     signal,
   });
@@ -638,24 +855,40 @@ async function groupSvpaImagesByOriginalPath(
   return Array.from(groups.values());
 }
 
+export function assignUniqueSvpaImagePaths(
+  preferredPaths: readonly string[],
+): readonly string[] {
+  const assigned: string[] = [];
+  const used = new Set<string>();
+  const nextSequenceByBase = new Map<string, number>();
+  for (const preferred of preferredPaths) {
+    const { stem, suffix } = splitExtension(preferred);
+    const baseKey = entryKey(preferred);
+    let candidate = preferred;
+    let sequence = nextSequenceByBase.get(baseKey) ?? 2;
+    while (used.has(entryKey(candidate))) {
+      candidate = `${stem}_${sequence}${suffix}`;
+      sequence += 1;
+    }
+    nextSequenceByBase.set(baseKey, sequence);
+    used.add(entryKey(candidate));
+    assigned.push(candidate);
+  }
+  return assigned;
+}
+
 function assignSvpaImagePaths(
   groups: readonly SvpaImageGroup[],
   imageFolder: string,
 ): ReadonlyMap<string, string> {
   const result = new Map<string, string>();
-  const used = new Set<string>();
-  for (const [index, group] of groups.entries()) {
+  const preferredPaths = groups.map((group, index) => {
     const relativeSource = group.source.relativePath || group.fileName;
-    const preferred = `${imageFolder}/${safeRelativePath(relativeSource, index)}`;
-    const { stem, suffix } = splitExtension(preferred);
-    let candidate = preferred;
-    let sequence = 1;
-    while (used.has(entryKey(candidate))) {
-      sequence += 1;
-      candidate = `${stem}_${sequence}${suffix}`;
-    }
-    used.add(entryKey(candidate));
-    result.set(group.key, candidate);
+    return `${imageFolder}/${safeRelativePath(relativeSource, index)}`;
+  });
+  const assignedPaths = assignUniqueSvpaImagePaths(preferredPaths);
+  for (const [index, group] of groups.entries()) {
+    result.set(group.key, assignedPaths[index]!);
   }
   return result;
 }
@@ -861,11 +1094,6 @@ function splitExtension(value: string): { stem: string; suffix: string } {
   return dot > slash
     ? { stem: value.slice(0, dot), suffix: value.slice(dot) }
     : { stem: value, suffix: "" };
-}
-
-function safeFileStem(value: string): string {
-  const stem = safeRelativePath(value, 0).split("/").at(-1) ?? "project";
-  return stem.replace(/\.[^.]+$/u, "") || "project";
 }
 
 function entryKey(value: string): string {

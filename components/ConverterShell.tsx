@@ -65,6 +65,7 @@ export type ImageMatchState =
 
 export interface ImageMatchIssue {
   readonly path: string;
+  readonly pathTitle?: string;
   readonly status: "missing" | "ambiguous";
   readonly message?: string;
 }
@@ -89,6 +90,7 @@ export interface ConverterDiagnostic {
   readonly message: string;
   readonly code?: string;
   readonly path?: string;
+  readonly pathTitle?: string;
 }
 
 export interface ConverterConfirmation {
@@ -115,6 +117,7 @@ export interface ConverterProgress {
   readonly percent?: number;
   readonly label?: string;
   readonly detail?: string;
+  readonly detailTitle?: string;
 }
 
 export interface ConverterSaveResult {
@@ -133,6 +136,7 @@ export interface ConverterShellProps {
   readonly confirmation?: ConverterConfirmation | null;
   readonly progress?: ConverterProgress | null;
   readonly saveResult?: ConverterSaveResult | null;
+  readonly preparedForSave?: boolean;
   readonly canSave?: boolean;
   readonly onSelectFile: (files: readonly File[]) => void;
   readonly onDrop: (files: readonly File[]) => void;
@@ -200,12 +204,13 @@ const copy = {
     saving: "正在保存…",
     cancel: "取消",
     retry: "重试保存",
+    chooseSaveLocation: "选择保存位置并开始写入",
     success: "转换完成",
     successDirect: "项目文件已保存到你选择的位置。",
     successDownload: "浏览器下载已开始，请在下载列表中查看。",
     successFallback: "项目文件已生成。",
     another: "转换另一个项目",
-    unsupported: "v0.0.1 仅支持 Classification 和多边形 Segmentation。",
+    unsupported: `v${APP_VERSION} 仅支持 Classification 和多边形 Segmentation。`,
     genericError: "转换未完成，源文件未被修改。",
     fileInputLabel: "选择一个 SaigeVision 项目文件",
     statusLabel: "转换状态",
@@ -301,12 +306,13 @@ const copy = {
     saving: "Saving…",
     cancel: "Cancel",
     retry: "Try saving again",
+    chooseSaveLocation: "Choose save location and start writing",
     success: "Conversion complete",
     successDirect: "The project file was saved to the location you chose.",
     successDownload: "The browser download has started. Check your downloads list.",
     successFallback: "The project file was created.",
     another: "Convert another project",
-    unsupported: "v0.0.1 supports only Classification and polygon Segmentation.",
+    unsupported: `v${APP_VERSION} supports only Classification and polygon Segmentation.`,
     genericError: "Conversion did not finish. The source file was not changed.",
     fileInputLabel: "Choose one SaigeVision project file",
     statusLabel: "Conversion status",
@@ -402,12 +408,13 @@ const copy = {
     saving: "저장 중…",
     cancel: "취소",
     retry: "저장 다시 시도",
+    chooseSaveLocation: "저장 위치를 선택하고 쓰기 시작",
     success: "변환 완료",
     successDirect: "선택한 위치에 프로젝트 파일을 저장했습니다.",
     successDownload: "브라우저 다운로드를 시작했습니다. 다운로드 목록을 확인하세요.",
     successFallback: "프로젝트 파일을 만들었습니다.",
     another: "다른 프로젝트 변환",
-    unsupported: "v0.0.1은 Classification 및 다각형 Segmentation만 지원합니다.",
+    unsupported: `v${APP_VERSION}은 Classification 및 다각형 Segmentation만 지원합니다.`,
     genericError: "변환이 완료되지 않았습니다. 원본 파일은 변경되지 않았습니다.",
     fileInputLabel: "SaigeVision 프로젝트 파일 하나 선택",
     statusLabel: "변환 상태",
@@ -481,6 +488,7 @@ export function ConverterShell({
   confirmation = null,
   progress = null,
   saveResult = null,
+  preparedForSave = false,
   canSave,
   onSelectFile,
   onDrop,
@@ -586,6 +594,7 @@ export function ConverterShell({
                     type="button"
                     aria-current={isCurrent ? "true" : undefined}
                     aria-pressed={isCurrent}
+                    disabled={isBusy || preparedForSave}
                     key={option.language}
                     onClick={() => onLanguageChange(option.language)}
                   >
@@ -643,7 +652,7 @@ export function ConverterShell({
                   outputs={outputs}
                   text={text}
                   name={`${inputId}-output`}
-                  disabled={isBusy || status === "success"}
+                  disabled={isBusy || preparedForSave || status === "success"}
                   onTargetChange={onTargetChange}
                 />
               ) : null}
@@ -653,7 +662,7 @@ export function ConverterShell({
                   summary={imageMatch}
                   text={text}
                   language={language}
-                  disabled={isBusy || status === "success"}
+                  disabled={isBusy || preparedForSave || status === "success"}
                   onSelectDirectory={onSelectDirectory}
                   onSelectImageFiles={onSelectImageFiles}
                   onSelectImageZip={onSelectImageZip}
@@ -674,12 +683,12 @@ export function ConverterShell({
                   confirmation={confirmation}
                   text={text}
                   inputId={`${inputId}-confirmation`}
-                  disabled={isBusy}
+                  disabled={isBusy || preparedForSave}
                   onChange={onConfirmationChange}
                 />
               ) : null}
 
-              {progress ? (
+              {progress && !(progress.stage === "matching" && imageMatch) ? (
                 <ProgressSection
                   progress={progress}
                   text={text}
@@ -703,6 +712,7 @@ export function ConverterShell({
               {status === "success" ? (
                 <SuccessSection
                   text={text}
+                  language={language}
                   result={saveResult}
                   onReset={onReset}
                   headingRef={successHeadingRef}
@@ -715,7 +725,9 @@ export function ConverterShell({
                     disabled={!saveEnabled}
                     onClick={onSave}
                   >
-                    {isChoosingSaveLocation
+                    {preparedForSave
+                      ? text.chooseSaveLocation
+                      : isChoosingSaveLocation
                       ? text.stages["choosing-save-location"]
                       : status === "saving"
                       ? text.saving
@@ -1105,7 +1117,7 @@ function ImageSection({
 
       {!isSourceReady ? (
         <>
-          <div className="converter-match-line" aria-live="polite">
+          <div className="converter-match-line">
             <span>
               {text.matched} {formatInteger(summary.matchedCount, language)} / {formatInteger(summary.totalCount, language)}
             </span>
@@ -1169,7 +1181,7 @@ function IssueRow({
 }) {
   return (
     <li>
-      <code title={issue.path}>{issue.path}</code>
+      <code title={issue.pathTitle ?? issue.path}>{issue.path}</code>
       <span>{issue.message ?? (issue.status === "missing" ? text.missing : text.ambiguous)}</span>
     </li>
   );
@@ -1238,7 +1250,7 @@ function DiagnosticRow({
         <span className="converter-visually-hidden">{severityLabel}</span>
         <span className="converter-diagnostic__message">{diagnostic.message}</span>
         {diagnostic.code || diagnostic.path ? (
-          <small>
+          <small title={diagnostic.pathTitle}>
             {[diagnostic.code, diagnostic.path].filter(Boolean).join(" · ")}
           </small>
         ) : null}
@@ -1310,17 +1322,19 @@ function ProgressSection({
         <span className="converter-spinner" aria-hidden="true" />
         <div>
           <strong>{progress.label ?? text.stages[progress.stage]}</strong>
-          {progress.detail ? <p>{progress.detail}</p> : null}
+          {progress.detail ? <p title={progress.detailTitle}>{progress.detail}</p> : null}
         </div>
         <div className="converter-work__actions">
           {valueText ? <span>{valueText}</span> : null}
-          <button
-            className="converter-button converter-button--quiet converter-work__cancel"
-            type="button"
-            onClick={onCancel}
-          >
-            {text.cancel}
-          </button>
+          {progress.stage !== "finalizing" ? (
+            <button
+              className="converter-button converter-button--quiet converter-work__cancel"
+              type="button"
+              onClick={onCancel}
+            >
+              {text.cancel}
+            </button>
+          ) : null}
         </div>
       </div>
       {hasDeterminateProgress ? (
@@ -1334,11 +1348,13 @@ function ProgressSection({
 
 function SuccessSection({
   text,
+  language,
   result,
   onReset,
   headingRef,
 }: {
   text: LocalizedCopy;
+  language: ConverterLanguage;
   result: ConverterSaveResult | null;
   onReset: () => void;
   headingRef: RefObject<HTMLHeadingElement | null>;
@@ -1355,9 +1371,14 @@ function SuccessSection({
         <h2 ref={headingRef} tabIndex={-1}>{text.success}</h2>
         <p>{detail}</p>
         {result?.fileName ? (
-          <code className="converter-success__filename" title={result.fileName}>
-            {result.fileName}
-          </code>
+          <div className="converter-success__file">
+            <code className="converter-success__filename" title={result.fileName}>
+              {result.fileName}
+            </code>
+            {result.size !== undefined ? (
+              <span>{formatBytes(result.size, language)}</span>
+            ) : null}
+          </div>
         ) : null}
       </div>
       <button

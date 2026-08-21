@@ -5,6 +5,7 @@ import { openValidatedZip, type OpenArchive } from "../lib/archive/zip.ts";
 import { loadProject } from "../lib/input/loadProject.ts";
 import type { ProjectFileIR, ProjectIR } from "../lib/model/project.ts";
 import {
+  assignUniqueSvpaImagePaths,
   assertContainerArchiveLimits,
   containerArchiveEntryCount,
   ContainerWriteError,
@@ -14,7 +15,11 @@ import {
 import type { FileSystemSaveHandle } from "../lib/output/save.ts";
 import { writeSrproj } from "../lib/output/srproj.ts";
 import { writeV2VisionProject } from "../lib/output/v2.ts";
-import { BROWSER_ARCHIVE_LIMITS } from "../lib/security/resourceLimits.ts";
+import {
+  BROWSER_ARCHIVE_LIMITS,
+  V1_PROJECT_LIMITS,
+  V2_PROJECT_LIMITS,
+} from "../lib/security/resourceLimits.ts";
 
 class MemorySaveHandle implements FileSystemSaveHandle {
   private chunks: ArrayBuffer[] = [];
@@ -119,6 +124,32 @@ test("container resource preflight mirrors archive reader boundaries", () => {
       error instanceof ContainerWriteError &&
       error.code === "OUTPUT_ARCHIVE_TEXT_ENTRY_LIMIT_EXCEEDED",
   );
+});
+
+test("accepted project file counts fit every complete archive format", () => {
+  assert.ok(
+    containerArchiveEntryCount("vision", V2_PROJECT_LIMITS.maxFiles) <=
+      BROWSER_ARCHIVE_LIMITS.maxEntries,
+  );
+  assert.ok(
+    containerArchiveEntryCount("svpa", V1_PROJECT_LIMITS.maxFiles) <=
+      BROWSER_ARCHIVE_LIMITS.maxEntries,
+  );
+});
+
+test("SVPA duplicate path assignment stays unique at the project limit", () => {
+  const preferred = new Array<string>(V1_PROJECT_LIMITS.maxFiles).fill(
+    "images/same.png",
+  );
+  const assigned = assignUniqueSvpaImagePaths(preferred);
+  assert.equal(assigned.length, V1_PROJECT_LIMITS.maxFiles);
+  assert.equal(
+    new Set(assigned.map((path) => path.toLocaleLowerCase("en-US"))).size,
+    assigned.length,
+  );
+  assert.equal(assigned[0], "images/same.png");
+  assert.equal(assigned[1], "images/same_2.png");
+  assert.equal(assigned.at(-1), `images/same_${V1_PROJECT_LIMITS.maxFiles}.png`);
 });
 
 function browserFile(blob: Blob, name: string): File {
@@ -237,6 +268,40 @@ test("vision container writes one root JSON and byte-identical images", async ()
   }
 });
 
+test("highly compressible generated project text remains readable at the loader boundary", async () => {
+  const source = project();
+  const compressible: ProjectIR = {
+    ...source,
+    project: {
+      ...source.project,
+      description: "A".repeat(200_000),
+    },
+  };
+  const built = writeV2VisionProject(compressible);
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  const handle = new MemorySaveHandle();
+  await writeVisionArchive({
+    destination: { fileName: built.fileName, handle },
+    built,
+    images: compressible.files.map((item, index) => ({
+      fileIndex: item.index,
+      originalPath: item.sourcePath,
+      source: {
+        kind: "blob" as const,
+        blob: new Blob([new Uint8Array([index + 1])]),
+      },
+    })),
+  });
+  const loaded = await loadProject(browserFile(handle.blob(), built.fileName));
+  try {
+    assert.equal(loaded.parseResult.ok, true);
+    assert.equal(loaded.project?.project.description.length, 200_000);
+  } finally {
+    await loaded.close();
+  }
+});
+
 test("container writers reject oversized plans before opening the destination", async () => {
   const source = project();
   const built = writeV2VisionProject(source);
@@ -319,7 +384,7 @@ test("SVPA container emits compatible manifest, project, images, readme and help
     assert.equal(archive.has("一键修复并打开项目.exe"), true);
     const manifest = JSON.parse(await archive.readText("svpa_manifest.json"));
     assert.equal(manifest.Generator, "SaigeVision Project Converter");
-    assert.equal(manifest.GeneratorVersion, "0.0.1");
+    assert.equal(manifest.GeneratorVersion, "0.0.2");
     assert.equal(manifest.ProjectFile, "项目/双向.srproj");
     assert.equal(manifest.OriginalProjectDirectory, "C:\\original\\project");
     assert.equal(manifest.Entries.length, 2);

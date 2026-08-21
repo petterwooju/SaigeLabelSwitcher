@@ -992,6 +992,7 @@ function parseFiles(
             labels,
             fileClassIndex,
             segmentationNormalClassIndex,
+            parsedLabels.segmentationNormalMarker === true,
           )
         : undefined;
 
@@ -1550,9 +1551,40 @@ function parseSegmentationFileState(
   labels: readonly ProjectLabelIR[],
   fileClassIndex: number | undefined,
   normalClassIndex: number | undefined,
+  hasNormalMarker: boolean,
 ): boolean | undefined {
   const isLabeled =
     typeof fileRaw.isLabeled === "boolean" ? fileRaw.isLabeled : undefined;
+
+  if (hasNormalMarker) {
+    if (isLabeled !== true) {
+      compatibility(context, {
+        code: "V2_SEGMENTATION_LABEL_STATE_CONFLICT",
+        disposition: "block",
+        severity: "error",
+        path: `${filePath}.isLabeled`,
+        message:
+          "A geometry-less structural OK marker requires isLabeled=true.",
+      });
+      return undefined;
+    }
+    if (
+      fileClassIndex !== undefined &&
+      (normalClassIndex === undefined || fileClassIndex !== normalClassIndex)
+    ) {
+      compatibility(context, {
+        code: "V2_SEGMENTATION_NORMAL_CLASS_CONTOUR_CONFLICT",
+        disposition: "block",
+        severity: "error",
+        path: `${filePath}.labelDataList`,
+        message:
+          "The structural OK marker conflicts with the file-level defect class assignment.",
+        details: { fileClassIndex, normalClassIndex: normalClassIndex ?? null },
+      });
+      return undefined;
+    }
+    return true;
+  }
 
   if (labels.length > 0) {
     if (isLabeled === false) {
@@ -1746,7 +1778,19 @@ function parseContours(
   if (!validateJsonValueBudget(context, decoded, `${path}.labelContour`)) {
     return [];
   }
-  const rings = normalizeRings(decoded);
+  let coordinateLimitExceeded = false;
+  const rings = normalizeRings(decoded, () => {
+    coordinateLimitExceeded = true;
+  });
+  if (coordinateLimitExceeded) {
+    invalid(
+      context,
+      `${path}.labelContour`,
+      "V2_POINT_COORDINATE_INVALID",
+      `Contour coordinates must be finite numbers with an absolute value no greater than ${Number.MAX_SAFE_INTEGER}.`,
+    );
+    return [];
+  }
   if (!rings || rings.length === 0 || rings.some((ring) => ring.length < 3)) {
     invalid(
       context,
@@ -1896,20 +1940,23 @@ function parseSegmentationBoundingBox(
   return { x, y, width, height };
 }
 
-function normalizeRings(value: unknown): readonly (readonly PointIR[])[] | undefined {
+function normalizeRings(
+  value: unknown,
+  onCoordinateLimitExceeded: () => void,
+): readonly (readonly PointIR[])[] | undefined {
   if (!Array.isArray(value) || value.length === 0) return undefined;
-  const directRing = normalizeRing(value);
+  const directRing = normalizeRing(value, onCoordinateLimitExceeded);
   if (directRing) return [directRing];
   const rings: PointIR[][] = [];
   for (const candidate of value) {
-    const ring = normalizeRing(candidate);
+    const ring = normalizeRing(candidate, onCoordinateLimitExceeded);
     if (ring) {
       rings.push(ring);
       continue;
     }
     if (Array.isArray(candidate)) {
       for (const nested of candidate) {
-        const nestedRing = normalizeRing(nested);
+        const nestedRing = normalizeRing(nested, onCoordinateLimitExceeded);
         if (!nestedRing) return undefined;
         rings.push(nestedRing);
       }
@@ -1920,17 +1967,33 @@ function normalizeRings(value: unknown): readonly (readonly PointIR[])[] | undef
   return rings.length > 0 ? rings : undefined;
 }
 
-function normalizeRing(value: unknown): PointIR[] | undefined {
+function normalizeRing(
+  value: unknown,
+  onCoordinateLimitExceeded: () => void,
+): PointIR[] | undefined {
   if (!Array.isArray(value) || value.length < 3) return undefined;
   const points: PointIR[] = [];
   for (const item of value) {
     if (!Array.isArray(item) || item.length < 2) return undefined;
-    const x = finiteNumber(item[0]);
-    const y = finiteNumber(item[1]);
+    const x = safeContourCoordinate(item[0], onCoordinateLimitExceeded);
+    const y = safeContourCoordinate(item[1], onCoordinateLimitExceeded);
     if (x === undefined || y === undefined) return undefined;
     points.push({ x, y });
   }
   return points;
+}
+
+function safeContourCoordinate(
+  value: unknown,
+  onCoordinateLimitExceeded: () => void,
+): number | undefined {
+  const number = finiteNumber(value);
+  if (number === undefined) return undefined;
+  if (Math.abs(number) > Number.MAX_SAFE_INTEGER) {
+    onCoordinateLimitExceeded();
+    return undefined;
+  }
+  return number;
 }
 
 function resolveClassIndex(
@@ -2517,8 +2580,17 @@ interface ParsedRectangleRoiShape {
   readonly top: number;
   readonly right: number;
   readonly bottom: number;
-  readonly tolerance: number;
+  /** Native SaigeVision may persist Konva's rendered client bounds, while
+   * converter output persists the rectangle's geometry bounds. */
+  readonly renderedBounds?: {
+    readonly left: number;
+    readonly top: number;
+    readonly right: number;
+    readonly bottom: number;
+  };
 }
+
+const ROI_BOUNDARY_TOLERANCE = 1e-6;
 
 type RoiShapeParseResult =
   | { readonly ok: true; readonly shape: ParsedRectangleRoiShape }
@@ -2652,10 +2724,13 @@ function parseProjectRoi(
         );
         valid = false;
       } else if (
-        !roiBoundaryClose(left, parsedShape.shape.left, parsedShape.shape.tolerance) ||
-        !roiBoundaryClose(top, parsedShape.shape.top, parsedShape.shape.tolerance) ||
-        !roiBoundaryClose(right, parsedShape.shape.right, parsedShape.shape.tolerance) ||
-        !roiBoundaryClose(bottom, parsedShape.shape.bottom, parsedShape.shape.tolerance)
+        !roiShapeMatchesBoundaries(
+          parsedShape.shape,
+          left,
+          top,
+          right,
+          bottom,
+        )
       ) {
         roiBlock(
           context,
@@ -2851,11 +2926,89 @@ function parseSerializedRectangleRoiShape(
   const top = (groupY + y * scaleY) / stageHeight;
   const right = (groupX + (x + width) * scaleX) / stageWidth;
   const bottom = (groupY + (y + height) * scaleY) / stageHeight;
-  const tolerance = Math.min(
-    0.05,
-    Math.max(0.01, 2 / Math.min(stageWidth, stageHeight)),
+  const outlineAttrs = isJsonObject(rectangles[1]?.attrs)
+    ? rectangles[1].attrs
+    : undefined;
+  const renderedRectangle = outlineAttrs
+    ? renderedRectangleClientBounds(outlineAttrs, x, y, width, height)
+    : undefined;
+  const renderedBounds = renderedRectangle
+    ? {
+        left: (groupX + renderedRectangle.left * scaleX) / stageWidth,
+        top: (groupY + renderedRectangle.top * scaleY) / stageHeight,
+        right: (groupX + renderedRectangle.right * scaleX) / stageWidth,
+        bottom: (groupY + renderedRectangle.bottom * scaleY) / stageHeight,
+      }
+    : undefined;
+  return {
+    ok: true,
+    shape: {
+      left,
+      top,
+      right,
+      bottom,
+      ...(renderedBounds ? { renderedBounds } : {}),
+    },
+  };
+}
+
+function renderedRectangleClientBounds(
+  attrs: JsonObject,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+} | undefined {
+  const strokeWidth = attrs.stroke === undefined
+    ? 0
+    : finiteNumber(attrs.strokeWidth) ?? 0;
+  const shadowBlur = attrs.shadowColor === undefined
+    ? 0
+    : finiteNumber(attrs.shadowBlur) ?? 0;
+  const shadowOffsetX = finiteNumber(attrs.shadowOffsetX) ?? 0;
+  const shadowOffsetY = finiteNumber(attrs.shadowOffsetY) ?? 0;
+  if (strokeWidth < 0 || shadowBlur < 0) return undefined;
+
+  // This mirrors the client-bound representation persisted by native V2 for
+  // its standard outline rectangle (strokeWidth=1, shadowBlur=1,
+  // shadowOffset=0.5). It is an exact alternate semantic representation, not
+  // a pixel-sized comparison tolerance.
+  const strokeExpansion = strokeWidth / 2;
+  const leftExpansion = Math.max(
+    strokeExpansion,
+    shadowBlur + Math.max(-shadowOffsetX, 0),
   );
-  return { ok: true, shape: { left, top, right, bottom, tolerance } };
+  const rightExpansion = Math.max(
+    strokeExpansion,
+    shadowBlur + Math.max(shadowOffsetX, 0),
+  );
+  const topExpansion = Math.max(
+    strokeExpansion,
+    shadowBlur + Math.max(-shadowOffsetY, 0),
+  );
+  const bottomExpansion = Math.max(
+    strokeExpansion,
+    shadowBlur + Math.max(shadowOffsetY, 0),
+  );
+  if (
+    leftExpansion === 0 &&
+    rightExpansion === 0 &&
+    topExpansion === 0 &&
+    bottomExpansion === 0
+  ) {
+    return undefined;
+  }
+  return {
+    left: x - leftExpansion,
+    top: y - topExpansion,
+    right: x + width + rightExpansion,
+    bottom: y + height + bottomExpansion,
+  };
 }
 
 function rectangleShapeTransformIsIdentity(attrs: JsonObject): boolean {
@@ -2884,9 +3037,27 @@ function shapeNumberClose(
 function roiBoundaryClose(
   value: number,
   expected: number,
-  tolerance: number,
 ): boolean {
-  return Math.abs(value - expected) <= tolerance;
+  return Math.abs(value - expected) <= ROI_BOUNDARY_TOLERANCE;
+}
+
+function roiShapeMatchesBoundaries(
+  shape: ParsedRectangleRoiShape,
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+): boolean {
+  const candidates = shape.renderedBounds
+    ? [shape, shape.renderedBounds]
+    : [shape];
+  return candidates.some(
+    (candidate) =>
+      roiBoundaryClose(left, candidate.left) &&
+      roiBoundaryClose(top, candidate.top) &&
+      roiBoundaryClose(right, candidate.right) &&
+      roiBoundaryClose(bottom, candidate.bottom),
+  );
 }
 
 function isPngBase64(value: string): boolean {

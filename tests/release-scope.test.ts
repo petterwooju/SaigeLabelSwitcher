@@ -8,7 +8,7 @@ import {
   SUPPORTED_PROJECT_TYPES,
 } from "../lib/release.ts";
 
-test("v0.0.1 metadata and visible release label stay in sync", async () => {
+test("v0.0.2 metadata and visible release label stay in sync", async () => {
   const [packageText, lockText, shellText, readmeText] = await Promise.all([
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../package-lock.json", import.meta.url), "utf8"),
@@ -21,15 +21,15 @@ test("v0.0.1 metadata and visible release label stay in sync", async () => {
     packages?: Record<string, { version?: string }>;
   };
 
-  assert.equal(APP_VERSION, "0.0.1");
+  assert.equal(APP_VERSION, "0.0.2");
   assert.equal(packageJson.version, APP_VERSION);
   assert.equal(packageLock.version, APP_VERSION);
   assert.equal(packageLock.packages?.[""]?.version, APP_VERSION);
   assert.match(shellText, /`v\$\{APP_VERSION\}`/u);
-  assert.match(readmeText, /当前发布：`v0\.0\.1`/u);
+  assert.match(readmeText, /当前发布：`v0\.0\.2`/u);
 });
 
-test("v0.0.1 exposes only Classification and Segmentation", () => {
+test("v0.0.2 exposes only Classification and Segmentation", () => {
   assert.deepEqual(SUPPORTED_PROJECT_TYPES, ["classification", "segmentation"]);
   assert.equal(isSupportedProjectType("classification"), true);
   assert.equal(isSupportedProjectType("segmentation"), true);

@@ -2,7 +2,7 @@
 
 SaigeVision V1 / V2 项目文件的纯浏览器双向转换 Webapp。项目、标注和图片只在用户浏览器本机读取与写入，不经过服务器。
 
-> 当前发布：`v0.0.1`。本版本只开放经过真实样本验证的 `Classification` 和多边形 `Segmentation`；其他项目类型留待后续版本。
+> 当前发布：`v0.0.2`。本版本只开放经过真实样本验证的 `Classification` 和多边形 `Segmentation`；其他项目类型留待后续版本。
 
 ## 当前支持
 
@@ -25,7 +25,7 @@ SaigeVision V1 / V2 项目文件的纯浏览器双向转换 Webapp。项目、�
 
 V1 的训练参数和数据增强参数目前没有经过验证的 V2 对应字段，因此不会写入 V2 项目；图片、类别、标注几何和 Training / Validation 划分不受影响。导入 V2 后请重新确认训练设置。
 
-ROI 当前支持“未启用”和经过真实样本验证的 `Simple + Rectangle`：V1 的归一化 `X/Y/Width/Height` 会转换为 V2 的 `left/top/right/bottom`（V2 原始字段名仍为 `roiPosX/roiPosY/roiWidth/roiHeight`）。Advanced、Ellipse、Blind、非默认 ROI 设置及未知形状会明确阻断，绝不通过确认框静默丢弃。V1→V2 会按目标图像尺寸重建可编辑的矩形 `roiShape`；派生 `roiBitmap` 不伪造，仍需在目标 V2 完成一次打开并重新保存的实机验收。
+ROI 当前支持“未启用”和经过真实样本验证的 `Simple + Rectangle`：V1 的归一化 `X/Y/Width/Height` 会转换为 V2 的 `left/top/right/bottom`（V2 原始字段名仍为 `roiPosX/roiPosY/roiWidth/roiHeight`）。Advanced、Ellipse、Blind、非默认 ROI 设置及未知形状会明确阻断，绝不通过确认框静默丢弃。V1→V2 会按目标图像尺寸重建可编辑的矩形 `roiShape`；派生 `roiBitmap` 不伪造。生成结果已在目标 V2 完成 ROI 打开、显示与重新保存的实机验收。
 
 Segmentation 当前支持 V1 `Contours` 与 V2 `labelContour` 多边形，按环方向保留 `Outer/Inner` 与孔洞；bitmap-only mask、退化/方向不明确的环会明确阻断。Detection、ROD、OCR 等尚未验证类型仍会明确阻断，不会“尽力转换”或静默丢弃标注。
 
@@ -47,17 +47,22 @@ npm.cmd run dev
 
 该站点是公开静态页面，但项目文件、标注和图片仍只由浏览器本机读取与写入；应用没有项目上传接口、数据库或对象存储。上线时自定义域名的 DNS CNAME 目标为 `petterwooju.github.io`，与 `svpa-export-beta.saigeai.com` 使用相同的发布方式。
 
+GitHub Pages 与上述自定义域名是正式生产发布的唯一来源。仓库保留 `.openai/hosting.json` 和 Vinext 配置，仅用于 Sites 兼容的备用预览/应急构建，不作为正式域名的发布链路。
+
 ## 验证
 
 ```powershell
 npm.cmd run check
 npm.cmd run test:pages
+npm.cmd run test:e2e:prepared
 npm.cmd run audit:dependencies
 ```
 
 `check` 固定执行 typecheck、lint、单元/安全测试、全新生产构建和构建产物 SSR 测试。测试覆盖四格式内容识别、V1/V2 round-trip、原生 V2 2.7.8 fixture、SVPA/vision 容器、官方 SVPA 路径规则、图片目录匹配、图片真实性、ZIP/XML/JSON 资源限制、取消操作和大文件流式保存门禁。
 
-`test:pages` 生成并核验 GitHub Pages 静态站点，包括正式域名元数据、v0.0.1 页面内容和路径修复助手的 SHA-256。
+`test:pages` 生成并核验 GitHub Pages 静态站点，包括正式域名元数据、v0.0.2 页面内容和路径修复助手的 SHA-256。
+
+`test:e2e:prepared` 使用桌面 Chrome 加载刚生成的 `out` 静态产物，实际下载并回读 `.srproj` 与 `SVPA.zip`；请先运行 `test:pages`。也可运行 `npm.cmd run test:e2e` 一次完成静态构建和浏览器验收。
 
 `audit:dependencies` 执行 npm 官方审计，并验证 Vinext 使用的 `image-size` 下游安全补丁与生产构建边界。当前审计结果为 0 个已知漏洞；补丁来源与回移说明见安全文档。
 

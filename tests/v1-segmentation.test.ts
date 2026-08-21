@@ -221,3 +221,42 @@ test("keeps Detection blocked while allowing verified Segmentation", () => {
   assert.equal(segmentation.ok, true);
   assert.equal(hasCode(segmentation, "V1_PROJECT_TYPE_UNSUPPORTED"), false);
 });
+
+test("reports NFKC-equivalent OK defect classes as reserved for V2 Segmentation", () => {
+  const result = parseV1Srproj(
+    segmentationFixture.replace("<Name>Scratch</Name>", "<Name>ＯＫ</Name>"),
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.compatibility.status, "blocked");
+  const diagnostic = result.diagnostics.find(
+    (item) => item.code === "V1_SEGMENTATION_OK_CLASS_RESERVED_IN_V2",
+  );
+  assert.equal(diagnostic?.category, "compatibility");
+  assert.equal(diagnostic?.disposition, "block");
+  assert.deepEqual(diagnostic?.details?.blockedTargets, [
+    "visionproj",
+    "subvisionproj",
+  ]);
+});
+
+test("reports non-opaque V1 ARGB colors as V2 alpha loss", () => {
+  const result = parseV1Srproj(
+    segmentationFixture.replace("<Color>-65536</Color>", "<Color>2148606515</Color>"),
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.compatibility.status, "confirmation-required");
+  if (!result.ok) return;
+  assert.equal(result.project.classes[0]?.color, "#80112233");
+  const diagnostic = result.diagnostics.find(
+    (item) => item.code === "V1_CLASS_COLOR_ALPHA_NOT_IN_V2",
+  );
+  assert.equal(diagnostic?.severity, "warning");
+  assert.equal(diagnostic?.disposition, "degrade");
+  assert.equal(diagnostic?.details?.alpha, 128);
+  assert.deepEqual(diagnostic?.details?.affectedTargets, [
+    "visionproj",
+    "subvisionproj",
+  ]);
+});

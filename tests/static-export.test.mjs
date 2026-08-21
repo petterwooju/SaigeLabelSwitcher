@@ -31,7 +31,7 @@ test("creates a complete static GitHub Pages site", async () => {
   const exportedHash = createHash("sha256").update(exportedHelper).digest("hex");
 
   assert.match(html, /<title>SaigeVision 项目转换<\/title>/iu);
-  assert.match(html, /v0\.0\.1/u);
+  assert.match(html, /v0\.0\.2/u);
   assert.match(html, /Classification/u);
   assert.match(html, /Segmentation/u);
   assert.match(

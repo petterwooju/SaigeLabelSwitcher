@@ -31,6 +31,36 @@ test("validated archive reads safe text", async () => {
   await archive.close();
 });
 
+test("validated archive accepts conventional safe directory entries", async () => {
+  const sink = new BlobWriter("application/zip");
+  const writer = new ZipWriter(sink, { useWebWorkers: false });
+  await writer.add("images/", undefined, { directory: true });
+  await writer.add("images/example.txt", new TextReader("safe"));
+  await writer.close();
+
+  const archive = await openValidatedZip(await sink.getData());
+  try {
+    assert.deepEqual(archive.names(), ["images/example.txt"]);
+    assert.equal(await archive.readText("images/example.txt"), "safe");
+  } finally {
+    await archive.close();
+  }
+});
+
+test("validated archive still rejects traversal directory entries", async () => {
+  const sink = new BlobWriter("application/zip");
+  const writer = new ZipWriter(sink, { useWebWorkers: false });
+  await writer.add("../", undefined, { directory: true });
+  await writer.close();
+
+  await assert.rejects(
+    openValidatedZip(await sink.getData()),
+    (error: unknown) =>
+      error instanceof ArchiveValidationError &&
+      error.code === "ZIP_PATH_TRAVERSAL",
+  );
+});
+
 test("equivalent archive paths collide case-insensitively", async () => {
   const source = await makeZip([
     ["images/A.png", "a"],

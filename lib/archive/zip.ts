@@ -91,7 +91,14 @@ export async function openValidatedZip(
 
     for (const entry of rawEntries) {
       const name = normalizeArchiveEntryName(entry.filename);
-      assertSafeArchiveEntryName(name);
+      // A ZIP directory conventionally ends in exactly one slash. Validate
+      // the directory path itself so the trailing separator is not mistaken
+      // for an empty traversal segment, while keeping the original name for
+      // byte accounting and diagnostics. File entries never get this
+      // exception, even when a producer gives them a slash-suffixed name.
+      const validatedName =
+        entry.directory && name.endsWith("/") ? name.slice(0, -1) : name;
+      assertSafeArchiveEntryName(validatedName);
       const entryNameBytes = new TextEncoder().encode(name).byteLength;
       if (entryNameBytes > resolvedLimits.maxEntryNameBytes) {
         throw new ArchiveValidationError(
@@ -107,7 +114,7 @@ export async function openValidatedZip(
         "ZIP 条目名称总量超过安全上限。",
       );
 
-      const canonical = canonicalArchiveName(name);
+      const canonical = canonicalArchiveName(validatedName);
       const existing = canonicalNames.get(canonical);
       if (existing) {
         throw new ArchiveValidationError(
@@ -130,7 +137,15 @@ export async function openValidatedZip(
         );
       }
 
-      if (entry.directory) continue;
+      if (entry.directory) {
+        if (entry.uncompressedSize !== 0) {
+          throw new ArchiveValidationError(
+            "ZIP_DIRECTORY_HAS_DATA",
+            `ZIP 目录条目包含意外数据：${redactPath(name)}`,
+          );
+        }
+        continue;
+      }
 
       if (entry.uncompressedSize > resolvedLimits.maxEntryBytes) {
         throw new ArchiveValidationError(

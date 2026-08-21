@@ -179,6 +179,30 @@ test("loads vision ZIP without inflating image bytes", async () => {
   assert.equal(loaded.archive.has("images/ok.png"), false);
 });
 
+test("does not mistake a V2 project JSON named svpa_manifest for an SVPA package", async () => {
+  const root = JSON.parse(v2Project("images/ok.png")) as {
+    project: { projectName: string };
+  };
+  root.project.projectName = "svpa_manifest";
+  const json = JSON.stringify(root);
+  const zip = await makeZip([
+    ["svpa_manifest.json", json],
+    ["images/ok.png", "not-decoded-image-bytes"],
+  ]);
+
+  const loaded = await loadProject(
+    browserFile([zip], "svpa_manifest.visionproj"),
+  );
+  try {
+    assert.equal(loaded.format, "v2-visionproj");
+    assert.equal(loaded.projectJsonText, json);
+    assert.equal(loaded.parseResult.ok, true);
+    assert.equal(loaded.project?.project.name, "svpa_manifest");
+  } finally {
+    await loaded.close();
+  }
+});
+
 test("loads a strict SVPA ZIP and binds manifest image entries lazily", async () => {
   const manifest = svpaManifest();
   const zip = await makeZip([

@@ -16,7 +16,7 @@ import type {
   ProjectType,
   SplitType,
 } from "../model/project.ts";
-import { isSupportedProjectType } from "../release.ts";
+import { APP_VERSION, isSupportedProjectType } from "../release.ts";
 import {
   appendBoundedProjectDiagnostic,
   exceedsUtf8ByteLimit,
@@ -207,13 +207,14 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
       message:
         type === "unknown"
           ? `V1 project type '${rawType}' is unknown.`
-          : `V1 ${rawType} is outside the v0.0.1 release scope; its labels are not mapped.`,
+          : `V1 ${rawType} is outside the v${APP_VERSION} release scope; its labels are not mapped.`,
       details: { rawProjectType: rawType },
     });
   }
 
   const classesResult = parseClasses(context, classGroup);
   if (!classesResult) return failure(context.diagnostics);
+  reportV1ToV2ClassCompatibility(context, type, classesResult.classes);
 
   const filesResult = parseImages(
     context,
@@ -368,6 +369,33 @@ function parseClasses(
   }
   if (declaredCount > 0 && classes.length !== classNodes.length) return undefined;
   return { classes, declaredCount };
+}
+
+function reportV1ToV2ClassCompatibility(
+  context: ParseContext,
+  projectType: ProjectType,
+  classes: readonly ProjectClassIR[],
+): void {
+  if (projectType !== "segmentation") return;
+  for (const cls of classes) {
+    if (
+      cls.name.trim().normalize("NFKC").toLocaleLowerCase("en-US") !== "ok"
+    ) {
+      continue;
+    }
+    compatibility(context, {
+      code: "V1_SEGMENTATION_OK_CLASS_RESERVED_IN_V2",
+      severity: "error",
+      disposition: "block",
+      path: `$.Project.ClassGroup.Class[${cls.sourceIndex}].Name`,
+      message:
+        "The class name 'OK' is reserved for V2 Segmentation normal-image state and cannot be used as a V1 defect class.",
+      details: {
+        className: cls.name,
+        blockedTargets: ["visionproj", "subvisionproj"],
+      },
+    });
+  }
 }
 
 function parseImages(
@@ -1094,6 +1122,20 @@ function parseV1Color(
   }
   const unsigned = number < 0 ? number + 0x1_0000_0000 : number;
   const argb = unsigned.toString(16).padStart(8, "0").toLocaleLowerCase();
+  if (!argb.startsWith("ff")) {
+    compatibility(context, {
+      code: "V1_CLASS_COLOR_ALPHA_NOT_IN_V2",
+      severity: "warning",
+      disposition: "degrade",
+      path,
+      message:
+        "V2 class colors do not preserve the V1 ARGB alpha channel; only RGB will be retained.",
+      details: {
+        alpha: Number.parseInt(argb.slice(0, 2), 16),
+        affectedTargets: ["visionproj", "subvisionproj"],
+      },
+    });
+  }
   return argb.startsWith("ff") ? `#${argb.slice(2)}` : `#${argb}`;
 }
 

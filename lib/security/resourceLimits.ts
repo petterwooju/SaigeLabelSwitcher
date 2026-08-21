@@ -15,6 +15,12 @@ export const EXTERNAL_PROJECT_PATH_MAX_BYTES = 32 * 1024;
 export const ARCHIVE_ENTRY_SEGMENT_MAX_BYTES = 255;
 export const PROJECT_DIAGNOSTIC_MAX_COUNT = 256;
 export const PROJECT_JSON_MAX_VALUES = 1_000_000;
+/**
+ * A complete SVPA archive adds four fixed entries (project, manifest, README,
+ * and repair helper). Keeping the project ceiling four below the ZIP ceiling
+ * guarantees that every accepted project still fits every advertised output.
+ */
+export const PROJECT_FILE_MAX_COUNT = 19_996;
 
 export const V1_PROJECT_LIMITS = Object.freeze({
   maxNodes: 250_000,
@@ -24,12 +30,12 @@ export const V1_PROJECT_LIMITS = Object.freeze({
   maxAttributes: 524_288,
   maxAttributesPerElement: 64,
   maxClasses: 10_000,
-  maxFiles: 20_000,
+  maxFiles: PROJECT_FILE_MAX_COUNT,
 });
 
 export const V2_PROJECT_LIMITS = Object.freeze({
   maxClasses: 10_000,
-  maxFiles: 20_000,
+  maxFiles: PROJECT_FILE_MAX_COUNT,
   maxDatasets: 1_024,
   maxLabels: 250_000,
   maxSplitMemberships: 250_000,

@@ -10,6 +10,7 @@ import {
 } from "../lib/files/directoryPicker.ts";
 import {
   createProjectImageReferences,
+  MAX_RETAINED_MATCH_CANDIDATES,
   matchImageFiles,
   matchProjectFiles,
   mergeArchiveImageEntries,
@@ -68,8 +69,50 @@ test("reports a same-name tie as ambiguous", () => {
   const report = matchImageFiles(["000.png"], files);
 
   assert.equal(report.ambiguousCount, 1);
+  assert.equal(report.matches[0]?.candidateCount, 2);
   assert.equal(report.matches[0]?.candidates.length, 2);
   assert.equal(report.canPackage, false);
+});
+
+test("bounds retained candidates for large same-name sets without losing exact counts", () => {
+  const candidateCount = 5_000;
+  const files = mergeSelectedFiles(
+    [],
+    Array.from({ length: candidateCount }, (_, index) =>
+      selectedFile(`source-${index}/000.png`, 1),
+    ),
+  );
+  const repeatedPaths = Array.from({ length: 1_000 }, () => "000.png");
+  const report = matchImageFiles(repeatedPaths, files);
+
+  assert.equal(report.ambiguousCount, repeatedPaths.length);
+  assert.equal(report.matches[0]?.candidateCount, candidateCount);
+  assert.equal(
+    report.matches[0]?.candidates.length,
+    MAX_RETAINED_MATCH_CANDIDATES,
+  );
+  assert.equal(
+    report.matches[0]?.candidates,
+    report.matches.at(-1)?.candidates,
+    "matches at the same suffix node should share one bounded sample",
+  );
+});
+
+test("large same-name sets still select the longest unique suffix", () => {
+  const files = mergeSelectedFiles(
+    [],
+    Array.from({ length: 2_000 }, (_, index) =>
+      selectedFile(`other-${index}/000.png`, 1),
+    ).concat([selectedFile("dataset/target/000.png", 3)]),
+  );
+  const report = matchImageFiles(["C:/project/target/000.png"], files);
+
+  assert.equal(report.matchedCount, 1);
+  assert.equal(report.matches[0]?.candidateCount, 1);
+  assert.equal(
+    report.matches[0]?.selectedFile?.relativePath,
+    "dataset/target/000.png",
+  );
 });
 
 test("never reuses one bare selected file for distinct project paths", () => {
