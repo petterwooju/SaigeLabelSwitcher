@@ -25,7 +25,7 @@ import {
   PROJECT_PATH_MAX_BYTES,
   exceedsUtf8ByteLimit,
   inspectJsonResourceUsage,
-  PROJECT_TEXT_MAX_BYTES,
+  V2_PROJECT_TEXT_MAX_BYTES,
   V2_PROJECT_LIMITS,
 } from "../security/resourceLimits.ts";
 
@@ -183,12 +183,12 @@ export function writeV2SubvisionProject(
     return { ok: false, diagnostics };
   }
   const jsonText = stringifyProject(json, options.space);
-  if (exceedsUtf8ByteLimit(jsonText, PROJECT_TEXT_MAX_BYTES)) {
+  if (exceedsUtf8ByteLimit(jsonText, V2_PROJECT_TEXT_MAX_BYTES)) {
     resourceBlock(
       diagnostics,
       "V2_WRITE_TEXT_LIMIT_EXCEEDED",
       "$",
-      `Generated V2 JSON exceeds the ${PROJECT_TEXT_MAX_BYTES}-byte UTF-8 limit.`,
+      `Generated V2 JSON exceeds the ${V2_PROJECT_TEXT_MAX_BYTES}-byte UTF-8 limit.`,
     );
     return { ok: false, diagnostics };
   }
@@ -248,12 +248,12 @@ export function writeV2VisionProject(
     return { ok: false, diagnostics };
   }
   const projectJsonText = stringifyProject(json, options.space);
-  if (exceedsUtf8ByteLimit(projectJsonText, PROJECT_TEXT_MAX_BYTES)) {
+  if (exceedsUtf8ByteLimit(projectJsonText, V2_PROJECT_TEXT_MAX_BYTES)) {
     resourceBlock(
       diagnostics,
       "V2_WRITE_TEXT_LIMIT_EXCEEDED",
       "$",
-      `Generated V2 JSON exceeds the ${PROJECT_TEXT_MAX_BYTES}-byte UTF-8 limit.`,
+      `Generated V2 JSON exceeds the ${V2_PROJECT_TEXT_MAX_BYTES}-byte UTF-8 limit.`,
     );
     return { ok: false, diagnostics };
   }

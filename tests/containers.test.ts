@@ -17,7 +17,9 @@ import { writeSrproj } from "../lib/output/srproj.ts";
 import { writeV2VisionProject } from "../lib/output/v2.ts";
 import {
   BROWSER_ARCHIVE_LIMITS,
+  V1_PROJECT_TEXT_MAX_BYTES,
   V1_PROJECT_LIMITS,
+  V2_PROJECT_TEXT_MAX_BYTES,
   V2_PROJECT_LIMITS,
 } from "../lib/security/resourceLimits.ts";
 
@@ -123,6 +125,51 @@ test("container resource preflight mirrors archive reader boundaries", () => {
     (error: unknown) =>
       error instanceof ContainerWriteError &&
       error.code === "OUTPUT_ARCHIVE_TEXT_ENTRY_LIMIT_EXCEEDED",
+  );
+
+  assert.equal(
+    assertContainerArchiveLimits(
+      2,
+      [V1_PROJECT_TEXT_MAX_BYTES, V2_PROJECT_TEXT_MAX_BYTES],
+      [
+        {
+          size: V1_PROJECT_TEXT_MAX_BYTES,
+          maximumBytes: V1_PROJECT_TEXT_MAX_BYTES,
+        },
+        {
+          size: V2_PROJECT_TEXT_MAX_BYTES,
+          maximumBytes: V2_PROJECT_TEXT_MAX_BYTES,
+        },
+      ],
+    ),
+    V1_PROJECT_TEXT_MAX_BYTES + V2_PROJECT_TEXT_MAX_BYTES,
+  );
+  assert.throws(
+    () =>
+      assertContainerArchiveLimits(
+        1,
+        [V2_PROJECT_TEXT_MAX_BYTES + 1],
+        [
+          {
+            size: V2_PROJECT_TEXT_MAX_BYTES + 1,
+            maximumBytes: V2_PROJECT_TEXT_MAX_BYTES,
+          },
+        ],
+      ),
+    (error: unknown) =>
+      error instanceof ContainerWriteError &&
+      error.code === "OUTPUT_ARCHIVE_TEXT_ENTRY_LIMIT_EXCEEDED",
+  );
+  assert.throws(
+    () =>
+      assertContainerArchiveLimits(
+        1,
+        [0],
+        [{ size: 0, maximumBytes: V1_PROJECT_TEXT_MAX_BYTES + 1 }],
+      ),
+    (error: unknown) =>
+      error instanceof ContainerWriteError &&
+      error.code === "OUTPUT_ARCHIVE_TEXT_LIMIT_INVALID",
   );
 });
 

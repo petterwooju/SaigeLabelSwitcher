@@ -22,7 +22,7 @@ import {
   PROJECT_PATH_MAX_BYTES,
   PROJECT_JSON_MAX_VALUES,
   PROJECT_STRUCTURE_MAX_DEPTH,
-  PROJECT_TEXT_MAX_BYTES,
+  V2_PROJECT_TEXT_MAX_BYTES,
   V2_PROJECT_LIMITS,
 } from "../lib/security/resourceLimits.ts";
 
@@ -386,7 +386,7 @@ test("same-version raw counts and final serialized text are bounded", () => {
     ...v1,
     project: {
       ...v1.project,
-      description: "x".repeat(PROJECT_TEXT_MAX_BYTES),
+      description: "x".repeat(V2_PROJECT_TEXT_MAX_BYTES),
     },
   });
   assert.equal(textResult.ok, false);

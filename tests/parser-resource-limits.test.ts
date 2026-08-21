@@ -12,9 +12,10 @@ import {
   PROJECT_JSON_MAX_VALUES,
   PROJECT_PATH_MAX_BYTES,
   PROJECT_STRUCTURE_MAX_DEPTH,
-  PROJECT_TEXT_MAX_BYTES,
   V1_PROJECT_LIMITS,
+  V1_PROJECT_TEXT_MAX_BYTES,
   V2_PROJECT_LIMITS,
+  V2_PROJECT_TEXT_MAX_BYTES,
 } from "../lib/security/resourceLimits.ts";
 
 function v1Project(path = "C:/images/frame.png", rootExtra = ""): string {
@@ -67,20 +68,25 @@ function hasCode(
   return result.diagnostics.some((item) => item.code === code);
 }
 
-test("parser entry points enforce the shared 16 MiB UTF-8 text limit", () => {
+test("parser entry points enforce their format-specific UTF-8 text limits", () => {
   assert.equal(exceedsUtf8ByteLimit("a", 1), false);
   assert.equal(exceedsUtf8ByteLimit("é", 1), true);
   assert.equal(exceedsUtf8ByteLimit("😀", 3), true);
   assert.equal(exceedsUtf8ByteLimit("\ud800", 2), true);
 
   const v1 = v1Project();
-  const oversizedXml = v1 + " ".repeat(PROJECT_TEXT_MAX_BYTES - v1.length + 1);
+  const largeButSupportedXml =
+    v1 + " ".repeat(V2_PROJECT_TEXT_MAX_BYTES - v1.length + 1);
+  assert.equal(parseV1Srproj({ xmlText: largeButSupportedXml }).ok, true);
+  const oversizedXml =
+    v1 + " ".repeat(V1_PROJECT_TEXT_MAX_BYTES - v1.length + 1);
   const v1Result = parseV1Srproj({ xmlText: oversizedXml });
   assert.equal(v1Result.ok, false);
   assert.ok(hasCode(v1Result, "V1_TEXT_LIMIT_EXCEEDED"));
 
   const v2 = JSON.stringify(v2Project());
-  const oversizedJson = v2 + " ".repeat(PROJECT_TEXT_MAX_BYTES - v2.length + 1);
+  const oversizedJson =
+    v2 + " ".repeat(V2_PROJECT_TEXT_MAX_BYTES - v2.length + 1);
   const v2Result = parseV2SubvisionProject({ jsonText: oversizedJson });
   assert.equal(v2Result.ok, false);
   assert.ok(hasCode(v2Result, "V2_TEXT_LIMIT_EXCEEDED"));

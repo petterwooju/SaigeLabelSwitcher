@@ -3,7 +3,11 @@ import type { OpenArchive } from "../archive/zip.ts";
 import { parseV1Srproj } from "../input/v1.ts";
 import type { ProjectIR } from "../model/project.ts";
 import { APP_VERSION } from "../release.ts";
-import { BROWSER_ARCHIVE_LIMITS } from "../security/resourceLimits.ts";
+import {
+  BROWSER_ARCHIVE_LIMITS,
+  V1_PROJECT_TEXT_MAX_BYTES,
+  V2_PROJECT_TEXT_MAX_BYTES,
+} from "../security/resourceLimits.ts";
 import {
   pathComparisonKey,
   validateZipEntryPath,
@@ -98,6 +102,12 @@ export class ContainerWriteError extends Error {
     this.name = "ContainerWriteError";
     this.code = code;
   }
+}
+
+export interface ContainerTextEntryResource {
+  readonly size: number;
+  /** Must not exceed the global V1 XML ceiling. */
+  readonly maximumBytes: number;
 }
 
 export async function writeVisionArchive({
@@ -251,7 +261,7 @@ function visionArchivePlan(
   const totalBytes = assertContainerArchiveLimits(
     totalFiles,
     [jsonBytes, ...imageSizes],
-    [jsonBytes],
+    [{ size: jsonBytes, maximumBytes: V2_PROJECT_TEXT_MAX_BYTES }],
   );
   const names = [
     built.projectJsonEntryName,
@@ -562,7 +572,20 @@ async function svpaArchivePlan({
       ...imageGroups.map((group) => sourceSize(group.source)),
       helperBlob.size,
     ],
-    textEntrySizes,
+    [
+      {
+        size: textEntrySizes[0]!,
+        maximumBytes: V1_PROJECT_TEXT_MAX_BYTES,
+      },
+      {
+        size: textEntrySizes[1]!,
+        maximumBytes: V2_PROJECT_TEXT_MAX_BYTES,
+      },
+      {
+        size: textEntrySizes[2]!,
+        maximumBytes: V2_PROJECT_TEXT_MAX_BYTES,
+      },
+    ],
   );
   const entryNames = [
     projectEntryName,
@@ -678,7 +701,7 @@ function sourceSize(source: BinarySource): number {
 export function assertContainerArchiveLimits(
   totalFiles: number,
   entrySizes: readonly number[],
-  textEntrySizes: readonly number[] = [],
+  textEntries: readonly (number | ContainerTextEntryResource)[] = [],
 ): number {
   assertContainerEntryCount(totalFiles);
   if (entrySizes.length !== totalFiles) {
@@ -688,12 +711,18 @@ export function assertContainerArchiveLimits(
     );
   }
 
-  for (const size of textEntrySizes) {
+  for (const entry of textEntries) {
+    const size = typeof entry === "number" ? entry : entry.size;
+    const maximumBytes =
+      typeof entry === "number"
+        ? BROWSER_ARCHIVE_LIMITS.maxTextBytes
+        : entry.maximumBytes;
     assertValidEntrySize(size);
-    if (size > BROWSER_ARCHIVE_LIMITS.maxTextBytes) {
+    assertValidTextLimit(maximumBytes);
+    if (size > maximumBytes) {
       throw new ContainerWriteError(
         "OUTPUT_ARCHIVE_TEXT_ENTRY_LIMIT_EXCEEDED",
-        `归档文本条目超过 ${BROWSER_ARCHIVE_LIMITS.maxTextBytes} 字节安全上限。`,
+        `归档文本条目超过 ${maximumBytes} 字节安全上限。`,
       );
     }
   }
@@ -754,6 +783,19 @@ function assertValidEntrySize(size: number): void {
     throw new ContainerWriteError(
       "OUTPUT_ARCHIVE_ENTRY_SIZE_INVALID",
       "归档条目大小无效。",
+    );
+  }
+}
+
+function assertValidTextLimit(maximumBytes: number): void {
+  if (
+    !Number.isSafeInteger(maximumBytes) ||
+    maximumBytes <= 0 ||
+    maximumBytes > V1_PROJECT_TEXT_MAX_BYTES
+  ) {
+    throw new ContainerWriteError(
+      "OUTPUT_ARCHIVE_TEXT_LIMIT_INVALID",
+      "归档文本条目的安全上限无效。",
     );
   }
 }

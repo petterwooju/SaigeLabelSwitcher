@@ -13,9 +13,8 @@ import { APP_VERSION, isSupportedProjectType } from "../release.ts";
 import {
   countProjectContourPoints,
   exceedsUtf8ByteLimit,
-  PROJECT_TEXT_MAX_BYTES,
+  V1_PROJECT_TEXT_MAX_BYTES,
   V1_PROJECT_LIMITS,
-  V2_PROJECT_LIMITS,
 } from "../security/resourceLimits.ts";
 
 export interface SrprojWriteOptions {
@@ -63,12 +62,15 @@ export function writeSrproj(
       `v${APP_VERSION} supports only Classification and polygon Segmentation; received '${project.project.rawType}'.`,
     );
   }
-  const totalContourPoints = countProjectContourPoints(project);
-  if (totalContourPoints > V2_PROJECT_LIMITS.maxContourPoints) {
+  const totalContourPoints = countProjectContourPoints(
+    project,
+    V1_PROJECT_LIMITS.maxContourPoints,
+  );
+  if (totalContourPoints > V1_PROJECT_LIMITS.maxContourPoints) {
     throw new SrprojWriteError(
       "SRPROJ_CONTOUR_POINT_LIMIT_EXCEEDED",
       "$.files[*].labels[*].geometry.contours",
-      `Total contour point count exceeds ${V2_PROJECT_LIMITS.maxContourPoints}.`,
+      `Total contour point count exceeds ${V1_PROJECT_LIMITS.maxContourPoints}.`,
     );
   }
 
@@ -275,11 +277,11 @@ function formatRoiNumber(value: number): string {
 }
 
 function assertGeneratedXmlResourceLimits(xml: string): void {
-  if (exceedsUtf8ByteLimit(xml, PROJECT_TEXT_MAX_BYTES)) {
+  if (exceedsUtf8ByteLimit(xml, V1_PROJECT_TEXT_MAX_BYTES)) {
     throw new SrprojWriteError(
       "SRPROJ_XML_TEXT_LIMIT_EXCEEDED",
       "$",
-      `Generated .srproj XML exceeds the ${PROJECT_TEXT_MAX_BYTES}-byte UTF-8 limit.`,
+      `Generated .srproj XML exceeds the ${V1_PROJECT_TEXT_MAX_BYTES}-byte UTF-8 limit.`,
     );
   }
 

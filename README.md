@@ -29,6 +29,8 @@ ROI 当前支持“未启用”和经过真实样本验证的 `Simple + Rectangl
 
 Segmentation 当前支持 V1 `Contours` 与 V2 `labelContour` 多边形，按环方向保留 `Outer/Inner` 与孔洞；bitmap-only mask、退化/方向不明确的环会明确阻断。Detection、ROD、OCR 等尚未验证类型仍会明确阻断，不会“尽力转换”或静默丢弃标注。
 
+浏览器安全处理边界为：V1 XML 项目文本 32 MiB、V2 JSON 项目文本 16 MiB，单个项目累计最多 500,000 个多边形轮廓点。超过边界时页面会明确说明项目规模暂不支持；这不代表源项目已经损坏，源文件也不会被修改。
+
 ## 本地运行
 
 需要 Node.js 22.13 或更高版本。

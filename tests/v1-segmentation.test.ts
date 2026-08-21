@@ -194,6 +194,58 @@ test("allows IsNormal=false with zero labels as an unlabeled image", () => {
   assert.deepEqual(result.project.files[1]?.labels, []);
 });
 
+test("infers zero labels when an empty normal image omits NumberOfLabels", () => {
+  const result = parseV1Srproj(
+    segmentationFixture.replace(
+      "        <NumberOfLabels>0</NumberOfLabels>\n",
+      "",
+    ),
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  const normal = result.project.files[1];
+  assert.equal(normal?.isNormal, true);
+  assert.equal(normal?.isLabeled, true);
+  assert.deepEqual(normal?.labels, []);
+  assert.equal(normal?.raw.declaredLabelCount, 0);
+  assert.equal(hasCode(result, "V1_REQUIRED_ELEMENT_MISSING"), false);
+});
+
+test("keeps NumberOfLabels mandatory except for empty normal images", async (t) => {
+  const missingNormalCount = segmentationFixture.replace(
+    "        <NumberOfLabels>0</NumberOfLabels>\n",
+    "",
+  );
+  const cases = [
+    {
+      name: "defect image without a declared count",
+      xml: missingNormalCount.replace(
+        "<IsNormal>true</IsNormal>",
+        "<IsNormal>false</IsNormal>",
+      ),
+      code: "V1_REQUIRED_ELEMENT_MISSING",
+    },
+    {
+      name: "normal image with labels and no declared count",
+      xml: segmentationFixture
+        .replace("        <NumberOfLabels>0</NumberOfLabels>\n", "")
+        .replace(
+          "        <IsNormal>true</IsNormal>\n",
+          `        <IsNormal>true</IsNormal>\n        <Label>\n          <ClassIndex>0</ClassIndex><Type>Contours</Type>\n          <ContourGroup><Contour Type="Outer">\n            <Point X="1" Y="1"/><Point X="2" Y="1"/><Point X="1" Y="2"/>\n          </Contour></ContourGroup>\n        </Label>\n`,
+        ),
+      code: "V1_NORMAL_IMAGE_HAS_LABELS",
+    },
+  ] as const;
+
+  for (const item of cases) {
+    await t.test(item.name, () => {
+      const result = parseV1Srproj(item.xml);
+      assert.equal(result.ok, false);
+      assert.equal(hasCode(result, item.code), true);
+    });
+  }
+});
+
 test("bounds declared Segmentation labels without allocating them", () => {
   const xml = segmentationFixture.replace(
     "<NumberOfLabels>2</NumberOfLabels>",

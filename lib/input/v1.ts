@@ -24,7 +24,7 @@ import {
   PROJECT_PATH_MAX_BYTES,
   PROJECT_STRUCTURE_MAX_DEPTH,
   projectDiagnosticsAreTruncated,
-  PROJECT_TEXT_MAX_BYTES,
+  V1_PROJECT_TEXT_MAX_BYTES,
   V1_PROJECT_LIMITS,
   V2_PROJECT_LIMITS,
 } from "../security/resourceLimits.ts";
@@ -115,13 +115,13 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
     unknownNodes: [],
   };
 
-  if (exceedsUtf8ByteLimit(normalizedInput.xmlText, PROJECT_TEXT_MAX_BYTES)) {
+  if (exceedsUtf8ByteLimit(normalizedInput.xmlText, V1_PROJECT_TEXT_MAX_BYTES)) {
     resourceLimit(
       context,
       "$",
       "V1_TEXT_LIMIT_EXCEEDED",
-      `V1 XML exceeds the ${PROJECT_TEXT_MAX_BYTES}-byte UTF-8 text limit.`,
-      { maxBytes: PROJECT_TEXT_MAX_BYTES },
+      `V1 XML exceeds the ${V1_PROJECT_TEXT_MAX_BYTES}-byte UTF-8 text limit.`,
+      { maxBytes: V1_PROJECT_TEXT_MAX_BYTES },
     );
     return failure(context.diagnostics);
   }
@@ -642,25 +642,41 @@ function parseSegmentationLabelGroup(
     path,
   );
   const isNormalText = requiredLeaf(context, group, "IsNormal", `${path}.IsNormal`);
-  const countText = requiredLeaf(
-    context,
-    group,
-    "NumberOfLabels",
-    `${path}.NumberOfLabels`,
-  );
   const isNormal = parseRequiredBoolean(
     context,
     isNormalText,
     `${path}.IsNormal`,
     "V1_IS_NORMAL_INVALID",
   );
-  const declaredCount = parseNonNegativeInteger(
-    context,
-    countText,
-    `${path}.NumberOfLabels`,
-    "V1_LABEL_COUNT_INVALID",
-  );
   const labelNodes = childElements(group, "Label");
+  const countNodes = childElements(group, "NumberOfLabels");
+  const mayInferEmptyNormalCount =
+    countNodes.length === 0 && isNormal === true && labelNodes.length === 0;
+  const countText =
+    countNodes.length === 0
+      ? undefined
+      : requiredLeaf(
+          context,
+          group,
+          "NumberOfLabels",
+          `${path}.NumberOfLabels`,
+        );
+  if (countNodes.length === 0 && !mayInferEmptyNormalCount) {
+    invalid(
+      context,
+      `${path}.NumberOfLabels`,
+      "V1_REQUIRED_ELEMENT_MISSING",
+      "Required <NumberOfLabels> element is missing.",
+    );
+  }
+  const declaredCount = mayInferEmptyNormalCount
+    ? 0
+    : parseNonNegativeInteger(
+        context,
+        countText,
+        `${path}.NumberOfLabels`,
+        "V1_LABEL_COUNT_INVALID",
+      );
   usage.labelCount = saturatingResourceAdd(
     usage.labelCount,
     labelNodes.length,
@@ -901,17 +917,17 @@ function parseSegmentationContours(
     usage.contourPointCount = saturatingResourceAdd(
       usage.contourPointCount,
       pointNodes.length,
-      V2_PROJECT_LIMITS.maxContourPoints,
+      V1_PROJECT_LIMITS.maxContourPoints,
     );
-    if (usage.contourPointCount > V2_PROJECT_LIMITS.maxContourPoints) {
+    if (usage.contourPointCount > V1_PROJECT_LIMITS.maxContourPoints) {
       resourceLimit(
         context,
         `${contourPath}.Point`,
         "V1_CONTOUR_POINT_LIMIT_EXCEEDED",
-        `V1 contour point count must not exceed ${V2_PROJECT_LIMITS.maxContourPoints}.`,
+        `V1 contour point count must not exceed ${V1_PROJECT_LIMITS.maxContourPoints}.`,
         {
           projectPointCount: usage.contourPointCount,
-          maxContourPoints: V2_PROJECT_LIMITS.maxContourPoints,
+          maxContourPoints: V1_PROJECT_LIMITS.maxContourPoints,
         },
       );
       return undefined;
@@ -1278,14 +1294,10 @@ function parseV1MaskingParameter(
   const type = rawType.trim().toLocaleLowerCase("en-US");
 
   if (type === "not set") {
-    if (!isNoopMaskingParameter(node)) {
-      unsupportedRoi(
-        context,
-        path,
-        "V1_ROI_STRUCTURE_UNSUPPORTED",
-        "Only the verified disabled masking form <MaskingParameter><Type>Not set</Type></MaskingParameter> is supported.",
-      );
-    } else {
+    const supported =
+      isNoopMaskingParameter(node) ||
+      validateDefaultDisabledV1MaskingParameter(context, node, path);
+    if (supported) {
       reportPreservedNoopMasking(context, node, path);
     }
     return { roi: { mode: "none" }, roiMode: "no" };
@@ -1329,6 +1341,7 @@ function parseV1SimpleRectangleRoi(
   path: string,
 ): Extract<ProjectRoiIR, { readonly mode: "simple" }> | undefined {
   reportUnsupportedRoiAttributes(context, node, new Set(), path);
+  rejectRoiElementText(context, node, path);
   reportUnsupportedRoiChildren(
     context,
     node,
@@ -1469,6 +1482,7 @@ function validateDefaultV1RoiSetting(
   path: string,
 ): void {
   reportUnsupportedRoiAttributes(context, node, new Set(), path);
+  rejectRoiElementText(context, node, path);
   reportUnsupportedRoiChildren(
     context,
     node,
@@ -1543,6 +1557,7 @@ function validateDefaultV1BlindGroup(
   path: string,
 ): void {
   reportUnsupportedRoiAttributes(context, node, new Set(), path);
+  rejectRoiElementText(context, node, path);
   reportUnsupportedRoiChildren(
     context,
     node,
@@ -1739,7 +1754,13 @@ function unsupportedRoi(
 }
 
 function isNoopMaskingParameter(node: XmlElement): boolean {
-  if (node.attributes.size > 0 || node.children.length !== 1) return false;
+  if (
+    node.attributes.size > 0 ||
+    node.children.length !== 1 ||
+    node.textParts.join("").trim() !== ""
+  ) {
+    return false;
+  }
   const type = node.children[0];
   return Boolean(
     type &&
@@ -1748,6 +1769,37 @@ function isNoopMaskingParameter(node: XmlElement): boolean {
       type.children.length === 0 &&
       type.textParts.join("").trim().toLocaleLowerCase("en-US") === "not set",
   );
+}
+
+function validateDefaultDisabledV1MaskingParameter(
+  context: ParseContext,
+  node: XmlElement,
+  path: string,
+): boolean {
+  const diagnosticStart = context.diagnostics.length;
+  const roi = parseV1SimpleRectangleRoi(context, node, path);
+  const blocked = context.diagnostics
+    .slice(diagnosticStart)
+    .some((diagnostic) => diagnostic.disposition === "block");
+  if (!roi || blocked) return false;
+
+  const isFullImageRectangle =
+    roi.left === 0 && roi.top === 0 && roi.right === 1 && roi.bottom === 1;
+  if (!isFullImageRectangle) {
+    unsupportedRoi(
+      context,
+      `${path}.RoiRectangle`,
+      "V1_ROI_SETTING_UNSUPPORTED",
+      "A disabled V1 ROI may retain only the verified full-image rectangle 0,0,1,1.",
+      {
+        left: roi.left,
+        top: roi.top,
+        right: roi.right,
+        bottom: roi.bottom,
+      },
+    );
+  }
+  return isFullImageRectangle;
 }
 
 function reportPreservedNoopMasking(

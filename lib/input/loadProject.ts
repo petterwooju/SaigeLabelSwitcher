@@ -20,7 +20,8 @@ import {
   exceedsUtf8ByteLimit,
   inspectJsonResourceUsage,
   PROJECT_PATH_MAX_BYTES,
-  PROJECT_TEXT_MAX_BYTES,
+  V1_PROJECT_TEXT_MAX_BYTES,
+  V2_PROJECT_TEXT_MAX_BYTES,
 } from "../security/resourceLimits.ts";
 import { parseV1Srproj } from "./v1.ts";
 import {
@@ -73,7 +74,6 @@ export class ProjectLoadError extends Error {
 
 export const LoadProjectError = ProjectLoadError;
 
-const MAX_PLAIN_PROJECT_BYTES = PROJECT_TEXT_MAX_BYTES;
 const MANIFEST_NAME = "svpa_manifest.json";
 
 /**
@@ -108,17 +108,25 @@ export async function loadProject(
     }
   }
 
-  if (sourceFile.size > MAX_PLAIN_PROJECT_BYTES) {
+  const plainFormat = await detectPlainProjectFormat(sourceFile, signal);
+  const maximumTextBytes =
+    plainFormat === "v1-srproj"
+      ? V1_PROJECT_TEXT_MAX_BYTES
+      : V2_PROJECT_TEXT_MAX_BYTES;
+  if (sourceFile.size > maximumTextBytes) {
     throw new ProjectLoadError(
       "PROJECT_TEXT_TOO_LARGE",
-      "Plain project text exceeds the safe read limit.",
-      { size: sourceFile.size, maximum: MAX_PLAIN_PROJECT_BYTES },
+      "Plain project text exceeds the safe read limit for its detected format.",
+      {
+        size: sourceFile.size,
+        maximum: maximumTextBytes,
+        detectedFormat: plainFormat,
+      },
     );
   }
 
   const text = await readUtf8File(sourceFile, signal);
-  const first = stripBom(text).trimStart()[0];
-  if (first === "<") {
+  if (plainFormat === "v1-srproj") {
     const result = withExtensionDiagnostic(
       parseV1Srproj({ xmlText: text, fileName: sourceFile.name }),
       sourceFile.name,
@@ -131,7 +139,7 @@ export async function loadProject(
       projectXmlText: text,
     });
   }
-  if (first === "{") {
+  if (plainFormat === "v2-subvisionproj") {
     const result = withExtensionDiagnostic(
       parseV2SubvisionProject({ jsonText: text, fileName: sourceFile.name }),
       sourceFile.name,
@@ -176,7 +184,7 @@ async function loadArchiveProject(
     const manifestEntryName = manifestCandidates[0];
     const manifestText = await archive.readText(
       manifestEntryName,
-      undefined,
+      V2_PROJECT_TEXT_MAX_BYTES,
       signal,
     );
     throwIfAborted(signal);
@@ -209,7 +217,11 @@ async function loadArchiveProject(
   }
 
   const projectJsonEntry = rootJsonEntries[0];
-  const projectJsonText = await archive.readText(projectJsonEntry, undefined, signal);
+  const projectJsonText = await archive.readText(
+    projectJsonEntry,
+    V2_PROJECT_TEXT_MAX_BYTES,
+    signal,
+  );
   throwIfAborted(signal);
   const result = withExtensionDiagnostic(
     parseV2VisionProject({
@@ -241,12 +253,16 @@ async function loadSvpaProject(
 ): Promise<LoadedProject> {
   const manifestText =
     manifestTextInput ??
-    (await archive.readText(manifestEntryName, undefined, signal));
+    (await archive.readText(
+      manifestEntryName,
+      V2_PROJECT_TEXT_MAX_BYTES,
+      signal,
+    ));
   throwIfAborted(signal);
   const manifest = parseSvpaManifest(manifestText, archive);
   const projectXmlText = await archive.readText(
     manifest.ProjectFile,
-    undefined,
+    V1_PROJECT_TEXT_MAX_BYTES,
     signal,
   );
   throwIfAborted(signal);
@@ -330,15 +346,20 @@ function parseSvpaManifest(text: string, archive: OpenArchive): SvpaManifest {
     );
   }
 
-  if (typeof value.OriginalProjectDirectory !== "string") {
+  const originalProjectDirectoryValue = value.OriginalProjectDirectory;
+  if (
+    originalProjectDirectoryValue !== undefined &&
+    typeof originalProjectDirectoryValue !== "string"
+  ) {
     throw new ProjectLoadError(
       "SVPA_ORIGINAL_DIRECTORY_INVALID",
       "SVPA OriginalProjectDirectory must be a string.",
     );
   }
+  const storedOriginalProjectDirectory = originalProjectDirectoryValue ?? "";
   if (
     exceedsUtf8ByteLimit(
-      value.OriginalProjectDirectory,
+      storedOriginalProjectDirectory,
       PROJECT_PATH_MAX_BYTES,
     )
   ) {
@@ -348,10 +369,10 @@ function parseSvpaManifest(text: string, archive: OpenArchive): SvpaManifest {
     );
   }
   const originalProjectDirectory =
-    value.OriginalProjectDirectory === ""
+    storedOriginalProjectDirectory === ""
       ? ""
       : normalizeExternalPath(
-          value.OriginalProjectDirectory,
+          storedOriginalProjectDirectory,
           undefined,
           "SVPA_ORIGINAL_DIRECTORY_INVALID",
         );
@@ -827,6 +848,53 @@ function hasZipSignature(bytes: Uint8Array): boolean {
     (bytes[2] === 0x05 && bytes[3] === 0x06) ||
     (bytes[2] === 0x07 && bytes[3] === 0x08)
   );
+}
+
+type PlainProjectFormat = "v1-srproj" | "v2-subvisionproj" | "unknown";
+
+/**
+ * Identify the plain-text format from a bounded, streaming prefix before
+ * applying its format-specific byte ceiling. This prevents a 16–32 MiB JSON
+ * document from borrowing the larger V1 XML allowance while still accepting
+ * contour-heavy V1 XML without materializing an over-limit file.
+ */
+async function detectPlainProjectFormat(
+  file: File,
+  signal?: AbortSignal,
+): Promise<PlainProjectFormat> {
+  const chunkSize = 64 * 1024;
+  const scanLimit = Math.min(file.size, V1_PROJECT_TEXT_MAX_BYTES);
+  let offset = 0;
+  let firstChunk = true;
+
+  while (offset < scanLimit) {
+    throwIfAborted(signal);
+    const end = Math.min(offset + chunkSize, scanLimit);
+    const bytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+    throwIfAborted(signal);
+    let index = 0;
+    if (
+      firstChunk &&
+      bytes.length >= 3 &&
+      bytes[0] === 0xef &&
+      bytes[1] === 0xbb &&
+      bytes[2] === 0xbf
+    ) {
+      index = 3;
+    }
+    firstChunk = false;
+    for (; index < bytes.length; index += 1) {
+      const byte = bytes[index]!;
+      if (byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x20) {
+        continue;
+      }
+      if (byte === 0x3c) return "v1-srproj";
+      if (byte === 0x7b) return "v2-subvisionproj";
+      return "unknown";
+    }
+    offset = end;
+  }
+  return "unknown";
 }
 
 async function readUtf8File(file: File, signal?: AbortSignal): Promise<string> {

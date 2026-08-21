@@ -160,14 +160,17 @@ test("writers reject project-wide contour totals above the shared limit", () => 
   );
 });
 
-test("srproj writer enforces the target XML node budget below the raw point cap", () => {
-  const source = projectWithContourPointCount(V2_PROJECT_LIMITS.maxContourPoints - 4);
-  assert.throws(
-    () => writeSrproj(source),
-    (error: unknown) =>
-      error instanceof Error &&
-      "code" in error &&
-      error.code === "SRPROJ_XML_NODE_LIMIT_EXCEEDED",
+test("srproj writer accepts and reparses the verified large-project contour scale", () => {
+  const verifiedSamplePointCount = 449_243;
+  assert.ok(verifiedSamplePointCount < V2_PROJECT_LIMITS.maxContourPoints);
+  const source = projectWithContourPointCount(verifiedSamplePointCount);
+  const xml = writeSrproj(source);
+  const reparsed = parseV1Srproj({ xmlText: xml });
+  assert.equal(reparsed.ok, true);
+  assert.equal(
+    reparsed.ok &&
+      reparsed.project.files[0]?.labels[0]?.geometry?.contours?.[0]?.length,
+    verifiedSamplePointCount,
   );
 });
 
