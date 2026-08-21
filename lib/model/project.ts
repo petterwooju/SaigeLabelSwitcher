@@ -71,6 +71,18 @@ export interface ProjectSourceIR {
   readonly rawProjectType: string;
 }
 
+/** Canonical ROI geometry expressed as normalized image-space boundaries. */
+export type ProjectRoiIR =
+  | { readonly mode: "none" }
+  | {
+      readonly mode: "simple";
+      readonly shape: "rectangle";
+      readonly left: number;
+      readonly top: number;
+      readonly right: number;
+      readonly bottom: number;
+    };
+
 export interface ProjectMetadataIR {
   readonly sourceId?: number | string;
   readonly name: string;
@@ -79,6 +91,8 @@ export interface ProjectMetadataIR {
   readonly description: string;
   readonly createdAt?: number;
   readonly modifiedAt?: number;
+  readonly roi?: ProjectRoiIR;
+  /** Legacy source-facing ROI mode retained while adapters migrate to `roi`. */
   readonly roiMode?: string;
   /** V2 fields are retained even when V1 has no declared mapping. */
   readonly raw: JsonObject;

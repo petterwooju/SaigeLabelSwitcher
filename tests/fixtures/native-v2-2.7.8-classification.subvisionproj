@@ -90,7 +90,7 @@
         "registeredDate": 1786604562964,
         "isGenerated": false,
         "splitSets": [
-          { "splitId": 193, "splitName": "srproj", "splitType": "validation" }
+          { "splitId": 193, "splitName": "srproj", "splitType": "val" }
         ]
       }
     ]

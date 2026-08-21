@@ -18,6 +18,7 @@ import type {
   ProjectIR,
   ProjectLabelIR,
   ProjectParseResult,
+  ProjectRoiIR,
   ProjectSourceFormat,
   ProjectSplitIR,
   ProjectType,
@@ -74,6 +75,7 @@ interface ArchiveContext {
 interface ParsedLabels {
   readonly labels: readonly ProjectLabelIR[];
   readonly classificationClassIndex?: number;
+  readonly segmentationNormalMarker?: boolean;
 }
 
 const SUPPORTED_PROJECT_TYPES: Readonly<Record<string, ProjectType>> = {
@@ -96,6 +98,8 @@ const PROJECT_KNOWN_FIELDS = new Set([
   "roiWidth",
   "roiHeight",
   "roiShapeType",
+  "roiShape",
+  "roiBitmap",
   "modifiedDate",
   "createdDate",
   "createdBy",
@@ -288,6 +292,8 @@ function parseProjectJson(text: string, context: ParseContext): ProjectParseResu
     });
   }
 
+  const roi = parseProjectRoi(context, projectRaw);
+
   const classValues = optionalObjectArray(
     context,
     projectRaw.classInfos,
@@ -357,6 +363,7 @@ function parseProjectJson(text: string, context: ParseContext): ProjectParseResu
       description: optionalString(projectRaw.description) ?? "",
       ...optionalNumberProperty("createdAt", projectRaw.createdDate),
       ...optionalNumberProperty("modifiedAt", projectRaw.modifiedDate),
+      ...(roi ? { roi } : {}),
       ...(optionalString(projectRaw.roiMode)
         ? { roiMode: optionalString(projectRaw.roiMode) }
         : {}),
@@ -823,6 +830,7 @@ function parseFiles(
   const ids = new Map<string, number>();
   const paths = new Map<string, number>();
   const files: ProjectFileIR[] = [];
+  let segmentationNormalMarkerCount = 0;
 
   for (const [index, raw] of values.entries()) {
     if (context.contourPointLimitExceeded) return undefined;
@@ -967,8 +975,12 @@ function parseFiles(
       fileClassIndex,
       width,
       height,
+      segmentationNormalClassIndex,
     );
     if (context.contourPointLimitExceeded) return undefined;
+    if (parsedLabels.segmentationNormalMarker) {
+      segmentationNormalMarkerCount += 1;
+    }
     const labels = parsedLabels.labels;
     validateGeometryBounds(context, labels, width, height, path);
     const segmentationIsNormal =
@@ -1005,6 +1017,18 @@ function parseFiles(
       labels,
       image,
       raw,
+    });
+  }
+
+  if (segmentationNormalMarkerCount > 0) {
+    compatibility(context, {
+      code: "V2_SEGMENTATION_NORMAL_MARKERS_REBUILT",
+      disposition: "rebuild",
+      severity: "info",
+      path: "$.project.projectFiles[*].labelDataList",
+      message:
+        "Geometry-less structural OK markers are normalized to V1 normal-image state.",
+      details: { affectedEntityCount: segmentationNormalMarkerCount },
     });
   }
 
@@ -1091,6 +1115,7 @@ function parseLabels(
   fileClassIndex: number | undefined,
   imageWidth: number | undefined,
   imageHeight: number | undefined,
+  segmentationNormalClassIndex: number | undefined,
 ): ParsedLabels {
   if (projectType === "classification") {
     return parseClassificationLabels(
@@ -1115,6 +1140,18 @@ function parseLabels(
     if (projectType === "segmentation") {
       validateContourSize(context, raw.contourSize, path);
     }
+    if (
+      projectType === "segmentation" &&
+      values.length === 1 &&
+      fileRaw.isLabeled === true &&
+      segmentationNormalClassIndex !== undefined &&
+      classIndex === segmentationNormalClassIndex &&
+      (fileClassIndex === undefined || fileClassIndex === segmentationNormalClassIndex) &&
+      !hasSegmentationGeometryFields(raw)
+    ) {
+      return { labels: [], segmentationNormalMarker: true };
+    }
+
     const geometry = parseLabelGeometry(context, raw, kind, path);
     if (context.contourPointLimitExceeded) break;
     if (kind === "unknown") {
@@ -1157,6 +1194,20 @@ function parseLabels(
     });
   }
   return { labels };
+}
+
+function hasSegmentationGeometryFields(raw: JsonObject): boolean {
+  return [
+    "labelPosX",
+    "labelPosY",
+    "labelWidth",
+    "labelHeight",
+    "labelBitmap",
+    "labelPolygon",
+    "labelContour",
+    "contourSize",
+    "contourId",
+  ].some((field) => raw[field] !== undefined);
 }
 
 function parseClassificationLabels(
@@ -2297,7 +2348,6 @@ function reportKnownLosses(
       });
     }
   }
-  reportRoiCompatibility(context, project);
   if (files.some((file) => hasMeaningfulValue(file.raw.metadata))) {
     compatibility(context, {
       code: "V2_FILE_METADATA_NOT_IN_V1",
@@ -2452,35 +2502,439 @@ function reportAggregatedFieldLoss(
   });
 }
 
-function reportRoiCompatibility(context: ParseContext, project: JsonObject): void {
-  const mode = optionalString(project.roiMode)?.trim().toLocaleLowerCase("en-US");
-  if (!mode || mode === "no") return;
+const V2_ROI_AUXILIARY_FIELDS = [
+  "roiPosX",
+  "roiPosY",
+  "roiWidth",
+  "roiHeight",
+  "roiShapeType",
+  "roiShape",
+  "roiBitmap",
+] as const;
 
-  const isDefaultFullImageRoi =
-    mode === "simple" &&
-    finiteNumber(project.roiPosX) === 0 &&
-    finiteNumber(project.roiPosY) === 0 &&
-    finiteNumber(project.roiWidth) === 1 &&
-    finiteNumber(project.roiHeight) === 1 &&
-    optionalString(project.roiShapeType)?.trim().toLocaleLowerCase("en-US") ===
-      "rectangle";
-  if (isDefaultFullImageRoi) {
-    compatibility(context, {
-      code: "V2_DEFAULT_FULL_IMAGE_ROI",
-      disposition: "preserve",
-      severity: "info",
-      path: "$.project.roiMode",
-      message: "The normalized full-image rectangle ROI is semantically equivalent to no crop.",
-    });
-    return;
+interface ParsedRectangleRoiShape {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+  readonly tolerance: number;
+}
+
+type RoiShapeParseResult =
+  | { readonly ok: true; readonly shape: ParsedRectangleRoiShape }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Parse the V2 ROI contract into normalized image-space boundaries. Despite
+ * their names, roiWidth and roiHeight are the right and bottom boundaries in
+ * native V2 projects; they are not extent width/height values.
+ */
+function parseProjectRoi(
+  context: ParseContext,
+  project: JsonObject,
+): ProjectRoiIR | undefined {
+  const rawMode = project.roiMode;
+  if (rawMode === undefined || rawMode === null || rawMode === "") {
+    if (V2_ROI_AUXILIARY_FIELDS.some((field) => hasMeaningfulValue(project[field]))) {
+      roiBlock(
+        context,
+        "V2_ROI_MODE_MISSING",
+        "$.project.roiMode",
+        "ROI geometry is present but roiMode is missing.",
+      );
+    }
+    return undefined;
+  }
+  if (typeof rawMode !== "string") {
+    roiBlock(
+      context,
+      "V2_ROI_MODE_INVALID",
+      "$.project.roiMode",
+      "roiMode must be a string.",
+    );
+    return undefined;
   }
 
+  const mode = rawMode.trim().toLocaleLowerCase("en-US");
+  if (mode === "no") {
+    if (V2_ROI_AUXILIARY_FIELDS.some((field) => hasMeaningfulValue(project[field]))) {
+      roiBlock(
+        context,
+        "V2_ROI_DISABLED_FIELD_CONFLICT",
+        "$.project.roiMode",
+        "A disabled ROI must not retain active ROI geometry or drawing fields.",
+      );
+      return undefined;
+    }
+    return { mode: "none" };
+  }
+  if (mode !== "simple") {
+    roiBlock(
+      context,
+      "V2_ROI_MODE_UNSUPPORTED",
+      "$.project.roiMode",
+      `ROI mode '${rawMode}' has no verified V1 mapping.`,
+    );
+    return undefined;
+  }
+
+  const left = finiteNumber(project.roiPosX);
+  const top = finiteNumber(project.roiPosY);
+  const right = finiteNumber(project.roiWidth);
+  const bottom = finiteNumber(project.roiHeight);
+  if (
+    left === undefined ||
+    top === undefined ||
+    right === undefined ||
+    bottom === undefined ||
+    left < 0 ||
+    top < 0 ||
+    right > 1 ||
+    bottom > 1 ||
+    right <= left ||
+    bottom <= top
+  ) {
+    roiBlock(
+      context,
+      "V2_ROI_BOUNDS_INVALID",
+      "$.project",
+      "A Simple ROI requires finite normalized boundaries with 0 <= left < right <= 1 and 0 <= top < bottom <= 1.",
+    );
+    return undefined;
+  }
+
+  let valid = true;
+  const rawShapeType = project.roiShapeType;
+  const hasShapeType = hasMeaningfulValue(rawShapeType);
+  if (
+    hasShapeType &&
+    (typeof rawShapeType !== "string" ||
+      rawShapeType.trim().toLocaleLowerCase("en-US") !== "rectangle")
+  ) {
+    roiBlock(
+      context,
+      "V2_ROI_SHAPE_TYPE_UNSUPPORTED",
+      "$.project.roiShapeType",
+      "Only a rectangular Simple ROI can be converted safely.",
+    );
+    valid = false;
+  }
+
+  const rawShape = project.roiShape;
+  const hasShape = hasMeaningfulValue(rawShape);
+  if (!hasShapeType && !hasShape) {
+    roiBlock(
+      context,
+      "V2_ROI_SHAPE_MISSING",
+      "$.project",
+      "A Simple ROI requires roiShapeType='rectangle' or a verifiable serialized rectangle roiShape.",
+    );
+    valid = false;
+  }
+
+  if (hasShape) {
+    if (typeof rawShape !== "string") {
+      roiBlock(
+        context,
+        "V2_ROI_SHAPE_INVALID",
+        "$.project.roiShape",
+        "roiShape must be serialized Konva JSON.",
+      );
+      valid = false;
+    } else {
+      const parsedShape = parseSerializedRectangleRoiShape(context, rawShape);
+      if (!parsedShape.ok) {
+        roiBlock(
+          context,
+          "V2_ROI_SHAPE_INVALID",
+          "$.project.roiShape",
+          `roiShape is not a supported single rectangle: ${parsedShape.reason}`,
+        );
+        valid = false;
+      } else if (
+        !roiBoundaryClose(left, parsedShape.shape.left, parsedShape.shape.tolerance) ||
+        !roiBoundaryClose(top, parsedShape.shape.top, parsedShape.shape.tolerance) ||
+        !roiBoundaryClose(right, parsedShape.shape.right, parsedShape.shape.tolerance) ||
+        !roiBoundaryClose(bottom, parsedShape.shape.bottom, parsedShape.shape.tolerance)
+      ) {
+        roiBlock(
+          context,
+          "V2_ROI_SHAPE_CONFLICT",
+          "$.project.roiShape",
+          "The serialized ROI rectangle disagrees with the normalized ROI boundaries.",
+        );
+        valid = false;
+      }
+    }
+  }
+
+  const rawBitmap = project.roiBitmap;
+  const hasBitmap = hasMeaningfulValue(rawBitmap);
+  if (hasBitmap && (typeof rawBitmap !== "string" || !isPngBase64(rawBitmap))) {
+    roiBlock(
+      context,
+      "V2_ROI_BITMAP_INVALID",
+      "$.project.roiBitmap",
+      "roiBitmap must be an unprefixed Base64-encoded PNG when supplied.",
+    );
+    valid = false;
+  }
+  if (!valid) return undefined;
+
+  const roi: ProjectRoiIR = {
+    mode: "simple",
+    shape: "rectangle",
+    left,
+    top,
+    right,
+    bottom,
+  };
+  const isFullImage = left === 0 && top === 0 && right === 1 && bottom === 1;
   compatibility(context, {
-    code: "V2_ROI_MAPPING_UNVERIFIED",
+    code: isFullImage ? "V2_DEFAULT_FULL_IMAGE_ROI" : "V2_SIMPLE_RECTANGLE_ROI",
+    disposition: "preserve",
+    severity: "info",
+    path: "$.project.roiMode",
+    message: isFullImage
+      ? "The normalized full-image rectangle ROI is semantically equivalent to no crop."
+      : "The Simple rectangle ROI is preserved as normalized left/top/right/bottom boundaries.",
+  });
+  if (hasShape) {
+    compatibility(context, {
+      code: "V2_ROI_SHAPE_REBUILT",
+      disposition: "rebuild",
+      severity: "info",
+      path: "$.project.roiShape",
+      message: "The serialized Konva ROI drawing is validated and rebuilt from normalized boundaries.",
+    });
+  }
+  if (hasBitmap) {
+    compatibility(context, {
+      code: "V2_ROI_BITMAP_REBUILT",
+      disposition: "rebuild",
+      severity: "info",
+      path: "$.project.roiBitmap",
+      message: "The derived ROI bitmap is validated and rebuilt from normalized boundaries.",
+    });
+  }
+  return roi;
+}
+
+function parseSerializedRectangleRoiShape(
+  context: ParseContext,
+  text: string,
+): RoiShapeParseResult {
+  if (!preflightJsonText(context, text, "$.project.roiShape", false)) {
+    return { ok: false, reason: "nested JSON exceeds the structural depth limit" };
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(stripBom(text));
+  } catch {
+    return { ok: false, reason: "invalid JSON" };
+  }
+  if (!validateJsonValueBudget(context, value, "$.project.roiShape")) {
+    return { ok: false, reason: "nested JSON exceeds the value limit" };
+  }
+  if (!isJsonObject(value) || value.className !== "Layer") {
+    return { ok: false, reason: "root is not a Konva Layer" };
+  }
+  const layerAttrs = isJsonObject(value.attrs) ? value.attrs : undefined;
+  const stageSize = layerAttrs && isJsonObject(layerAttrs.stageSize)
+    ? layerAttrs.stageSize
+    : undefined;
+  const stageWidth = positiveNumber(stageSize?.width);
+  const stageHeight = positiveNumber(stageSize?.height);
+  if (stageWidth === undefined || stageHeight === undefined) {
+    return { ok: false, reason: "stageSize is missing or invalid" };
+  }
+  if (!Array.isArray(value.children) || !value.children.every(isJsonObject)) {
+    return { ok: false, reason: "Layer children are invalid" };
+  }
+
+  const groups = value.children.filter(
+    (child) =>
+      child.className === "Group" &&
+      isJsonObject(child.attrs) &&
+      child.attrs.name === "roi-area",
+  );
+  if (groups.length !== 1) {
+    return { ok: false, reason: "expected exactly one roi-area Group" };
+  }
+  const group = groups[0]!;
+  if (
+    value.children.some(
+      (child) => child !== group && child.className !== "Rect",
+    )
+  ) {
+    return { ok: false, reason: "Layer contains unsupported drawing nodes" };
+  }
+  const groupAttrs = isJsonObject(group.attrs) ? group.attrs : undefined;
+  if (!groupAttrs) return { ok: false, reason: "roi-area attributes are invalid" };
+  if (groupAttrs.UIType !== "roi") {
+    return { ok: false, reason: "roi-area is not a rectangular ROI group" };
+  }
+  for (const field of [
+    "x",
+    "y",
+    "scaleX",
+    "scaleY",
+    "rotation",
+    "skewX",
+    "skewY",
+    "offsetX",
+    "offsetY",
+  ] as const) {
+    if (groupAttrs[field] !== undefined && finiteNumber(groupAttrs[field]) === undefined) {
+      return { ok: false, reason: `roi-area ${field} is not a finite number` };
+    }
+  }
+  const groupX = finiteNumber(groupAttrs.x) ?? 0;
+  const groupY = finiteNumber(groupAttrs.y) ?? 0;
+  const scaleX = finiteNumber(groupAttrs.scaleX) ?? 1;
+  const scaleY = finiteNumber(groupAttrs.scaleY) ?? 1;
+  const rotation = finiteNumber(groupAttrs.rotation) ?? 0;
+  const skewX = finiteNumber(groupAttrs.skewX) ?? 0;
+  const skewY = finiteNumber(groupAttrs.skewY) ?? 0;
+  const offsetX = finiteNumber(groupAttrs.offsetX) ?? 0;
+  const offsetY = finiteNumber(groupAttrs.offsetY) ?? 0;
+  if (
+    scaleX <= 0 ||
+    scaleY <= 0 ||
+    rotation !== 0 ||
+    skewX !== 0 ||
+    skewY !== 0 ||
+    offsetX !== 0 ||
+    offsetY !== 0
+  ) {
+    return { ok: false, reason: "rotated, skewed, offset, or reflected ROI groups are unsupported" };
+  }
+  if (!Array.isArray(group.children) || !group.children.every(isJsonObject)) {
+    return { ok: false, reason: "roi-area children are invalid" };
+  }
+  const rectangles = group.children.filter((child) => child.className === "Rect");
+  if (
+    rectangles.length < 1 ||
+    rectangles.length > 2 ||
+    rectangles.length !== group.children.length
+  ) {
+    return { ok: false, reason: "roi-area must contain one rectangle or two matching render rectangles" };
+  }
+  const firstAttrs = isJsonObject(rectangles[0]?.attrs)
+    ? rectangles[0].attrs
+    : undefined;
+  if (!firstAttrs || !rectangleShapeTransformIsIdentity(firstAttrs)) {
+    return { ok: false, reason: "rectangle transform fields are unsupported" };
+  }
+  const x = finiteNumber(firstAttrs?.x);
+  const y = finiteNumber(firstAttrs?.y);
+  const width = positiveNumber(firstAttrs?.width);
+  const height = positiveNumber(firstAttrs?.height);
+  if (x === undefined || y === undefined || width === undefined || height === undefined) {
+    return { ok: false, reason: "rectangle geometry is invalid" };
+  }
+  for (const rectangle of rectangles.slice(1)) {
+    const attrs = isJsonObject(rectangle.attrs) ? rectangle.attrs : undefined;
+    if (
+      !attrs ||
+      !rectangleShapeTransformIsIdentity(attrs) ||
+      !shapeNumberClose(finiteNumber(attrs?.x), x) ||
+      !shapeNumberClose(finiteNumber(attrs?.y), y) ||
+      !shapeNumberClose(finiteNumber(attrs?.width), width) ||
+      !shapeNumberClose(finiteNumber(attrs?.height), height)
+    ) {
+      return { ok: false, reason: "render rectangles do not describe one geometry" };
+    }
+  }
+
+  const left = (groupX + x * scaleX) / stageWidth;
+  const top = (groupY + y * scaleY) / stageHeight;
+  const right = (groupX + (x + width) * scaleX) / stageWidth;
+  const bottom = (groupY + (y + height) * scaleY) / stageHeight;
+  const tolerance = Math.min(
+    0.05,
+    Math.max(0.01, 2 / Math.min(stageWidth, stageHeight)),
+  );
+  return { ok: true, shape: { left, top, right, bottom, tolerance } };
+}
+
+function rectangleShapeTransformIsIdentity(attrs: JsonObject): boolean {
+  const fields = [
+    ["scaleX", 1],
+    ["scaleY", 1],
+    ["rotation", 0],
+    ["skewX", 0],
+    ["skewY", 0],
+    ["offsetX", 0],
+    ["offsetY", 0],
+  ] as const;
+  return fields.every(([field, identity]) => {
+    const value = attrs[field];
+    return value === undefined || finiteNumber(value) === identity;
+  });
+}
+
+function shapeNumberClose(
+  value: number | undefined,
+  expected: number,
+): boolean {
+  return value !== undefined && Math.abs(value - expected) <= 1e-7;
+}
+
+function roiBoundaryClose(
+  value: number,
+  expected: number,
+  tolerance: number,
+): boolean {
+  return Math.abs(value - expected) <= tolerance;
+}
+
+function isPngBase64(value: string): boolean {
+  const normalized = value.trim();
+  if (
+    normalized.length < 64 ||
+    normalized.length % 4 !== 0 ||
+    !normalized.startsWith("iVBORw0KGgoAAAANSUhEUg") ||
+    !/^(?:[A-Za-z\d+/]{4})*(?:[A-Za-z\d+/]{2}==|[A-Za-z\d+/]{3}=)?$/u.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+  try {
+    const prefix = globalThis.atob(normalized.slice(0, 32));
+    if (prefix.length < 24) return false;
+    const readUint32 = (offset: number): number =>
+      ((prefix.charCodeAt(offset) << 24) |
+        (prefix.charCodeAt(offset + 1) << 16) |
+        (prefix.charCodeAt(offset + 2) << 8) |
+        prefix.charCodeAt(offset + 3)) >>> 0;
+    const width = readUint32(16);
+    const height = readUint32(20);
+    return (
+      width > 0 &&
+      height > 0 &&
+      width <= MAX_IMAGE_DIMENSION &&
+      height <= MAX_IMAGE_DIMENSION &&
+      width * height <= MAX_IMAGE_PIXELS
+    );
+  } catch {
+    return false;
+  }
+}
+
+function roiBlock(
+  context: ParseContext,
+  code: string,
+  path: string,
+  message: string,
+): void {
+  compatibility(context, {
+    code,
     disposition: "block",
     severity: "error",
-    path: "$.project.roiMode",
-    message: "A custom or incomplete V2 ROI has no verified V1 mapping.",
+    path,
+    message,
   });
 }
 

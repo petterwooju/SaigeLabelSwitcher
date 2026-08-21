@@ -730,6 +730,240 @@ function cloneV2JsonWithPaths(
   return root;
 }
 
+type V2RoiDefault = "classification" | "segmentation";
+
+function buildV2RoiFields(
+  project: ProjectIR,
+  files: readonly ProjectFileIR[],
+  defaultMode: V2RoiDefault,
+  diagnostics: ProjectDiagnostic[],
+): MutableJsonObject | undefined {
+  const roi = project.project.roi;
+  const legacyMode = normalizeLegacyRoiMode(project.project.roiMode);
+  if (!roi) {
+    if (legacyMode === "simple" || legacyMode === "other") {
+      block(
+        diagnostics,
+        "V2_WRITE_ROI_GEOMETRY_REQUIRED",
+        "$.project.roi",
+        "An enabled legacy ROI mode cannot be written without normalized rectangle boundaries.",
+      );
+      return undefined;
+    }
+    return defaultV2RoiFields(defaultMode);
+  }
+
+  const runtimeMode: unknown = (roi as { readonly mode?: unknown }).mode;
+  if (runtimeMode !== "none" && runtimeMode !== "simple") {
+    block(
+      diagnostics,
+      "V2_WRITE_ROI_MODE_UNSUPPORTED",
+      "$.project.roi.mode",
+      "Only disabled ROI and a verified Simple Rectangle ROI can be written to V2.",
+    );
+    return undefined;
+  }
+  if (
+    legacyMode !== undefined &&
+    (legacyMode === "other" || legacyMode !== runtimeMode)
+  ) {
+    block(
+      diagnostics,
+      "V2_WRITE_ROI_MODE_CONFLICT",
+      "$.project.roiMode",
+      "The legacy ROI mode conflicts with the normalized ROI model.",
+    );
+    return undefined;
+  }
+  if (roi.mode === "none") return defaultV2RoiFields(defaultMode);
+  if (roi.shape !== "rectangle") {
+    block(
+      diagnostics,
+      "V2_WRITE_ROI_SHAPE_UNSUPPORTED",
+      "$.project.roi.shape",
+      "Only a rectangular Simple ROI can be written to V2.",
+    );
+    return undefined;
+  }
+
+  const { left, top, right, bottom } = roi;
+  if (
+    !Number.isFinite(left) ||
+    !Number.isFinite(top) ||
+    !Number.isFinite(right) ||
+    !Number.isFinite(bottom) ||
+    left < 0 ||
+    top < 0 ||
+    right > 1 ||
+    bottom > 1 ||
+    right <= left ||
+    bottom <= top
+  ) {
+    block(
+      diagnostics,
+      "V2_WRITE_ROI_BOUNDS_INVALID",
+      "$.project.roi",
+      "A Simple ROI requires finite normalized boundaries with 0 <= left < right <= 1 and 0 <= top < bottom <= 1.",
+    );
+    return undefined;
+  }
+
+  const fields: MutableJsonObject = {
+    roiMode: "simple",
+    roiPosX: left,
+    roiPosY: top,
+    // Native V2 stores right/bottom boundaries in the misleadingly named
+    // roiWidth/roiHeight fields.
+    roiWidth: right,
+    roiHeight: bottom,
+    roiShapeType: "rectangle",
+  };
+  if (left === 0 && top === 0 && right === 1 && bottom === 1) return fields;
+
+  const referenceFile = files[0];
+  if (
+    !referenceFile ||
+    !isPositiveSafeInteger(referenceFile.width) ||
+    !isPositiveSafeInteger(referenceFile.height)
+  ) {
+    block(
+      diagnostics,
+      "V2_WRITE_ROI_STAGE_SIZE_REQUIRED",
+      "$.files[0]",
+      "A custom ROI requires the first image width and height to rebuild the native drawing shape.",
+    );
+    return undefined;
+  }
+  fields.roiShape = buildRectangleRoiShape(
+    project,
+    referenceFile.width,
+    referenceFile.height,
+    left,
+    top,
+    right,
+    bottom,
+  );
+  rebuildInfo(
+    diagnostics,
+    "V2_WRITE_ROI_SHAPE_REBUILT",
+    "$.project.roiShape",
+    "The native Konva rectangle is rebuilt deterministically from normalized ROI boundaries.",
+  );
+  rebuildInfo(
+    diagnostics,
+    "V2_WRITE_ROI_BITMAP_REGENERATION_DEFERRED",
+    "$.project.roiBitmap",
+    "The derived roiBitmap is intentionally omitted so V2 can regenerate it from roiShape.",
+  );
+  return fields;
+}
+
+function normalizeLegacyRoiMode(
+  value: string | undefined,
+): "none" | "simple" | "other" | undefined {
+  const mode = value?.trim().toLocaleLowerCase("en-US");
+  if (!mode) return undefined;
+  if (mode === "no" || mode === "none" || mode === "not set") return "none";
+  return mode === "simple" ? "simple" : "other";
+}
+
+function defaultV2RoiFields(defaultMode: V2RoiDefault): MutableJsonObject {
+  return defaultMode === "classification"
+    ? {
+        roiMode: "simple",
+        roiPosX: 0,
+        roiPosY: 0,
+        roiWidth: 1,
+        roiHeight: 1,
+        roiShapeType: "rectangle",
+      }
+    : { roiMode: "no" };
+}
+
+function buildRectangleRoiShape(
+  project: ProjectIR,
+  stageWidth: number,
+  stageHeight: number,
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+): string {
+  const rectangle = {
+    x: left * stageWidth,
+    y: top * stageHeight,
+    width: (right - left) * stageWidth,
+    height: (bottom - top) * stageHeight,
+  };
+  const identity = `${deterministicProjectId(project)}:${left}:${top}:${right}:${bottom}`;
+  const shape: MutableJsonObject = {
+    attrs: {
+      id: "base-layer",
+      stageSize: { width: stageWidth, height: stageHeight },
+    },
+    className: "Layer",
+    children: [
+      {
+        attrs: {
+          id: deterministicUuid(`${identity}:background`),
+          isBackground: true,
+          width: stageWidth,
+          height: stageHeight,
+          fill: "black",
+          selectable: false,
+          opacity: 0.6,
+          selected: false,
+        },
+        className: "Rect",
+      },
+      {
+        attrs: {
+          id: deterministicUuid(`${identity}:group`),
+          name: "roi-area",
+          selectable: true,
+          selected: false,
+          UIType: "roi",
+          x: 0,
+          y: 0,
+          scaleX: 1,
+          scaleY: 1,
+        },
+        className: "Group",
+        children: [
+          {
+            attrs: {
+              ...rectangle,
+              id: deterministicUuid(`${identity}:mask`),
+              fill: "white",
+              selectable: false,
+              strokeWidth: 1,
+              globalCompositeOperation: "destination-out",
+            },
+            className: "Rect",
+          },
+          {
+            attrs: {
+              ...rectangle,
+              id: deterministicUuid(`${identity}:outline`),
+              selectable: false,
+              stroke: "white",
+              dash: [2, 2],
+              shadowColor: "black",
+              shadowBlur: 1,
+              shadowOffsetX: 0.5,
+              shadowOffsetY: 0.5,
+              strokeWidth: 1,
+              strokeScaleEnabled: false,
+            },
+            className: "Rect",
+          },
+        ],
+      },
+    ],
+  };
+  return JSON.stringify(shape);
+}
+
 function buildClassificationJson(
   project: ProjectIR,
   filePaths: readonly string[],
@@ -830,6 +1064,9 @@ function buildClassificationJson(
     };
   });
 
+  const roiFields = buildV2RoiFields(project, files, "classification", diagnostics);
+  if (!roiFields) return undefined;
+
   if (hasBlockingDiagnostic(diagnostics)) return undefined;
 
   const root: MutableJsonObject = {
@@ -838,12 +1075,7 @@ function buildClassificationJson(
       projectName: project.project.name,
       projectType: "cls",
       description: project.project.description,
-      roiMode: "simple",
-      roiPosX: 0,
-      roiPosY: 0,
-      roiWidth: 1,
-      roiHeight: 1,
-      roiShapeType: "rectangle",
+      ...roiFields,
       modifiedDate: timestamp,
       createdDate: timestamp,
       metadataList: [],
@@ -1053,6 +1285,9 @@ function buildSegmentationJson(
     };
   });
 
+  const roiFields = buildV2RoiFields(project, files, "segmentation", diagnostics);
+  if (!roiFields) return undefined;
+
   if (hasBlockingDiagnostic(diagnostics)) return undefined;
   return {
     project: {
@@ -1060,7 +1295,7 @@ function buildSegmentationJson(
       projectName: project.project.name,
       projectType: "seg",
       description: project.project.description,
-      roiMode: "no",
+      ...roiFields,
       modifiedDate: timestamp,
       createdDate: timestamp,
       metadataList: [],
@@ -1365,7 +1600,7 @@ function v2SplitType(
     case "training":
       return "train";
     case "validation":
-      return "valid";
+      return "val";
     case "unassigned":
       return "not-split";
     case "unknown":
@@ -1749,6 +1984,22 @@ function resourceBlock(
     category: "security",
     severity: "error",
     disposition: "block",
+    path,
+    message,
+  });
+}
+
+function rebuildInfo(
+  diagnostics: ProjectDiagnostic[],
+  code: string,
+  path: string,
+  message: string,
+): void {
+  appendBoundedProjectDiagnostic(diagnostics, {
+    code,
+    category: "compatibility",
+    severity: "info",
+    disposition: "rebuild",
     path,
     message,
   });

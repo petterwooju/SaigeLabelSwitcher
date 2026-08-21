@@ -300,6 +300,135 @@ test("distinguishes normal, unlabeled, and ambiguous empty Segmentation files", 
   );
 });
 
+test("normalizes geometry-less structural OK markers with one aggregate diagnostic", () => {
+  const fixture = segmentationProject();
+  const first = firstFile(fixture);
+  first.isLabeled = true;
+  first.classNo = 0;
+  first.className = "OK";
+  first.labelDataList = [
+    { labelId: 90, labelType: "man", classNo: 0, className: "OK" },
+  ];
+  const second = structuredClone(first);
+  second.fileId = 8;
+  second.filePath = String.raw`C:\images\normal-2.png`;
+  (fixture.project.projectFiles as Array<Record<string, unknown>>).push(second);
+
+  const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+  const project = parsedProject(result);
+  assert.notEqual(result.compatibility.status, "blocked");
+  assert.equal(project.files.length, 2);
+  assert.ok(project.files.every((file) => file.isNormal === true));
+  assert.ok(project.files.every((file) => file.labels.length === 0));
+  const diagnostics = result.diagnostics.filter(
+    (item) => item.code === "V2_SEGMENTATION_NORMAL_MARKERS_REBUILT",
+  );
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]?.disposition, "rebuild");
+  assert.equal(diagnostics[0]?.severity, "info");
+  assert.equal(diagnostics[0]?.details?.affectedEntityCount, 2);
+  assert.equal(
+    result.diagnostics.some(
+      (item) =>
+        item.code === "V2_LABEL_GEOMETRY_UNSUPPORTED" ||
+        item.code === "V2_SEGMENTATION_NORMAL_CLASS_CONTOUR_CONFLICT",
+    ),
+    false,
+  );
+});
+
+test("keeps unsafe geometry-less Segmentation label combinations blocked", async (t) => {
+  const marker = {
+    labelId: 90,
+    labelType: "man",
+    classNo: 0,
+    className: "OK",
+  };
+
+  await t.test("OK label with geometry", () => {
+    const fixture = segmentationProject();
+    const file = firstFile(fixture);
+    file.classNo = 0;
+    file.className = "OK";
+    const defect = (file.labelDataList as Array<Record<string, unknown>>)[0]!;
+    file.labelDataList = [{ ...defect, classNo: 0, className: "OK" }];
+    const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+    parsedProject(result);
+    assert.equal(result.compatibility.status, "blocked");
+    assert.ok(
+      result.diagnostics.some(
+        (item) => item.code === "V2_SEGMENTATION_NORMAL_CLASS_CONTOUR_CONFLICT",
+      ),
+    );
+  });
+
+  await t.test("NG label without geometry", () => {
+    const fixture = segmentationProject();
+    const file = firstFile(fixture);
+    file.classNo = 1;
+    file.className = "Scratch";
+    file.labelDataList = [
+      { labelId: 91, labelType: "man", classNo: 1, className: "Scratch" },
+    ];
+    const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+    parsedProject(result);
+    assert.equal(result.compatibility.status, "blocked");
+    assert.ok(
+      result.diagnostics.some(
+        (item) => item.code === "V2_LABEL_GEOMETRY_UNSUPPORTED",
+      ),
+    );
+  });
+
+  await t.test("mixed OK marker and NG contour", () => {
+    const fixture = segmentationProject();
+    const file = firstFile(fixture);
+    const defect = (file.labelDataList as Array<Record<string, unknown>>)[0]!;
+    file.labelDataList = [marker, defect];
+    const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+    parsedProject(result);
+    assert.equal(result.compatibility.status, "blocked");
+    assert.ok(
+      result.diagnostics.some(
+        (item) => item.code === "V2_SEGMENTATION_NORMAL_CLASS_CONTOUR_CONFLICT",
+      ),
+    );
+  });
+
+  await t.test("unlabeled file with OK marker", () => {
+    const fixture = segmentationProject();
+    const file = firstFile(fixture);
+    file.isLabeled = false;
+    file.classNo = 0;
+    file.className = "OK";
+    file.labelDataList = [marker];
+    const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+    parsedProject(result);
+    assert.equal(result.compatibility.status, "blocked");
+    assert.ok(
+      result.diagnostics.some(
+        (item) => item.code === "V2_SEGMENTATION_LABEL_STATE_CONFLICT",
+      ),
+    );
+  });
+
+  await t.test("file-level defect class with OK marker", () => {
+    const fixture = segmentationProject();
+    const file = firstFile(fixture);
+    file.classNo = 1;
+    file.className = "Scratch";
+    file.labelDataList = [marker];
+    const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+    parsedProject(result);
+    assert.equal(result.compatibility.status, "blocked");
+    assert.ok(
+      result.diagnostics.some(
+        (item) => item.code === "V2_SEGMENTATION_NORMAL_CLASS_CONTOUR_CONFLICT",
+      ),
+    );
+  });
+});
+
 test("allows multiple defect classes even when file.className is only a summary", () => {
   const fixture = segmentationProject();
   fixture.project.classInfos.push({

@@ -170,6 +170,7 @@ test("V1 classification output uses deterministic IDs and the observed V2 schema
   const datasetJson = projectJson.datasets[0]!;
   const datasetSplit = (datasetJson.splitSets as Array<Record<string, unknown>>)[0]!;
   const fileJson = projectJson.projectFiles[0]!;
+  const validationFileJson = projectJson.projectFiles[1]!;
   const fileSplit = (fileJson.splitSets as Array<Record<string, unknown>>)[0]!;
   const labels = fileJson.labelDataList as Array<Record<string, unknown>>;
   const labelJson = labels[0]!;
@@ -261,6 +262,13 @@ test("V1 classification output uses deterministic IDs and the observed V2 schema
       splitType: "train",
     },
   ]);
+  assert.deepEqual(validationFileJson.splitSets, [
+    {
+      splitId: projectJson.projectId + 2,
+      splitName: "srproj",
+      splitType: "val",
+    },
+  ]);
   assert.equal(labelJson.labelId, projectJson.projectId + 100_000);
   assert.equal(labelJson.labelType, "man");
   assert.equal(labelJson.labeledDate, 1_700_000_000_000);
@@ -281,6 +289,126 @@ test("V1 classification writer output reparses without unmapped fields", () => {
     0,
   );
   assert.notEqual(reparsed.compatibility.status, "blocked");
+});
+
+test("V1 custom rectangle ROI writes native LTRB fields and a deterministic Konva shape", () => {
+  const source = v1ClassificationProject();
+  const project: ProjectIR = {
+    ...source,
+    project: {
+      ...source.project,
+      roi: {
+        mode: "simple",
+        shape: "rectangle",
+        left: 0.07332293,
+        top: 0.1560062,
+        right: 0.91731663,
+        bottom: 0.9048362,
+      },
+    },
+  };
+
+  const first = writeV2SubvisionProject(project);
+  const second = writeV2SubvisionProject(project);
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  if (!first.ok || !second.ok) return;
+  assert.equal(first.jsonText, second.jsonText);
+
+  const root = first.json.project as JsonObject;
+  assert.equal(root.roiMode, "simple");
+  assert.equal(root.roiPosX, 0.07332293);
+  assert.equal(root.roiPosY, 0.1560062);
+  assert.equal(root.roiWidth, 0.91731663);
+  assert.equal(root.roiHeight, 0.9048362);
+  assert.equal(root.roiShapeType, "rectangle");
+  assert.equal(typeof root.roiShape, "string");
+  assert.equal(root.roiBitmap, undefined);
+  assert.ok(
+    first.diagnostics.some((item) => item.code === "V2_WRITE_ROI_SHAPE_REBUILT"),
+  );
+  assert.ok(
+    first.diagnostics.some(
+      (item) => item.code === "V2_WRITE_ROI_BITMAP_REGENERATION_DEFERRED",
+    ),
+  );
+
+  const reparsed = parseV2SubvisionProject({ jsonText: first.jsonText });
+  assert.equal(reparsed.ok, true);
+  if (!reparsed.ok) return;
+  assert.notEqual(reparsed.compatibility.status, "blocked");
+  assert.deepEqual(reparsed.project.project.roi, project.project.roi);
+});
+
+test("V2 writer blocks invalid canonical ROI boundaries", () => {
+  const source = v1ClassificationProject();
+  const project = {
+    ...source,
+    project: {
+      ...source.project,
+      roi: {
+        mode: "simple",
+        shape: "rectangle",
+        left: 0.8,
+        top: 0.1,
+        right: 0.2,
+        bottom: 0.9,
+      },
+    },
+  } as ProjectIR;
+  const result = writeV2SubvisionProject(project);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((item) => item.code === "V2_WRITE_ROI_BOUNDS_INVALID"),
+  );
+});
+
+test("V2 writer rejects forged ROI modes and legacy-mode conflicts", () => {
+  const source = v1ClassificationProject();
+  const forged = {
+    ...source,
+    project: {
+      ...source.project,
+      roi: {
+        mode: "advanced",
+        shape: "rectangle",
+        left: 0.1,
+        top: 0.1,
+        right: 0.9,
+        bottom: 0.9,
+      },
+    },
+  } as unknown as ProjectIR;
+  const forgedResult = writeV2SubvisionProject(forged);
+  assert.equal(forgedResult.ok, false);
+  assert.ok(
+    forgedResult.diagnostics.some(
+      (item) => item.code === "V2_WRITE_ROI_MODE_UNSUPPORTED",
+    ),
+  );
+
+  const conflicted: ProjectIR = {
+    ...source,
+    project: {
+      ...source.project,
+      roiMode: "no",
+      roi: {
+        mode: "simple",
+        shape: "rectangle",
+        left: 0.1,
+        top: 0.1,
+        right: 0.9,
+        bottom: 0.9,
+      },
+    },
+  };
+  const conflictResult = writeV2SubvisionProject(conflicted);
+  assert.equal(conflictResult.ok, false);
+  assert.ok(
+    conflictResult.diagnostics.some(
+      (item) => item.code === "V2_WRITE_ROI_MODE_CONFLICT",
+    ),
+  );
 });
 
 test("subvision output rejects relative and traversal image paths", () => {
@@ -386,6 +514,12 @@ test("vision output maps duplicate Windows basenames to unique images entries", 
       (item) => item.filePath,
     ),
     ["images/frame.png", "images/frame_2.png"],
+  );
+  assert.deepEqual(
+    ((result.json.project as JsonObject).projectFiles as readonly JsonObject[]).map(
+      (item) => ((item.splitSets as readonly JsonObject[])[0]?.splitType),
+    ),
+    ["train", "val"],
   );
   assert.equal(result.imageEntries[0]?.source.kind, "external");
 });

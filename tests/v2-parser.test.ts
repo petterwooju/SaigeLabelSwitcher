@@ -62,6 +62,39 @@ function clsProject(): Record<string, unknown> {
   };
 }
 
+function serializedRectangleRoiShape(
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+): string {
+  const stageSize = { width: 1000, height: 800 };
+  const rectangle = {
+    x: left * stageSize.width,
+    y: top * stageSize.height,
+    width: (right - left) * stageSize.width,
+    height: (bottom - top) * stageSize.height,
+  };
+  return JSON.stringify({
+    attrs: { id: "base-layer", stageSize },
+    className: "Layer",
+    children: [
+      {
+        attrs: { isBackground: true, width: stageSize.width, height: stageSize.height },
+        className: "Rect",
+      },
+      {
+        attrs: { name: "roi-area", UIType: "roi", x: 0, y: 0, scaleX: 1, scaleY: 1 },
+        className: "Group",
+        children: [
+          { attrs: { ...rectangle, fill: "white" }, className: "Rect" },
+          { attrs: { ...rectangle, stroke: "white" }, className: "Rect" },
+        ],
+      },
+    ],
+  });
+}
+
 function clsProjectWithFirstLabel(
   geometry: Record<string, unknown> = {},
 ): Record<string, unknown> {
@@ -145,6 +178,19 @@ test("parses a valid .subvisionproj into canonical classification IR", () => {
   assert.equal(result.project.files[1]?.labels[0]?.kind, "classification");
   assert.equal(result.project.files[1]?.labels[0]?.classIndex, 1);
   assert.equal(result.project.files[0]?.image.kind, "external");
+});
+
+test("reads the legacy valid split token produced by older converter builds", () => {
+  const fixture = clsProject();
+  const project = fixture.project as {
+    projectFiles: Array<{ splitSets: Array<{ splitType: string }> }>;
+  };
+  project.projectFiles[1]!.splitSets[0]!.splitType = "valid";
+
+  const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.project.files[1]?.canonicalSplit, "validation");
 });
 
 test("parses a valid .visionproj using supplied entry names and bytes", () => {
@@ -760,7 +806,7 @@ test("blocks V1 compatibility when only one classification file is unclassified"
   );
 });
 
-test("accepts the native default full-image ROI but blocks a custom ROI", () => {
+test("maps native V2 ROI boundaries without treating right/bottom as extents", () => {
   const defaultRoi = clsProject();
   const defaultProject = defaultRoi.project as Record<string, unknown>;
   Object.assign(defaultProject, {
@@ -796,12 +842,172 @@ test("accepts the native default full-image ROI but blocks a custom ROI", () => 
     jsonText: JSON.stringify(customRoi),
   });
   assert.equal(customResult.ok, true);
-  assert.equal(customResult.compatibility.status, "blocked");
+  if (!customResult.ok) return;
+  assert.notEqual(customResult.compatibility.status, "blocked");
+  assert.deepEqual(customResult.project.project.roi, {
+    mode: "simple",
+    shape: "rectangle",
+    left: 0,
+    top: 0,
+    right: 0.75,
+    bottom: 1,
+  });
   assert.ok(
     customResult.diagnostics.some(
-      (item) => item.code === "V2_ROI_MAPPING_UNVERIFIED",
+      (item) => item.code === "V2_SIMPLE_RECTANGLE_ROI",
     ),
   );
+});
+
+test("accepts a verified native Konva rectangle and derived PNG bitmap", () => {
+  const fixture = clsProject();
+  const project = fixture.project as Record<string, unknown>;
+  Object.assign(project, {
+    roiMode: "simple",
+    roiPosX: 0.1,
+    roiPosY: 0.2,
+    roiWidth: 0.8,
+    roiHeight: 0.9,
+    roiShape: serializedRectangleRoiShape(0.1, 0.2, 0.8, 0.9),
+    roiBitmap:
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  });
+
+  const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.notEqual(result.compatibility.status, "blocked");
+  assert.deepEqual(result.project.project.roi, {
+    mode: "simple",
+    shape: "rectangle",
+    left: 0.1,
+    top: 0.2,
+    right: 0.8,
+    bottom: 0.9,
+  });
+  assert.ok(result.diagnostics.some((item) => item.code === "V2_ROI_SHAPE_REBUILT"));
+  assert.ok(result.diagnostics.some((item) => item.code === "V2_ROI_BITMAP_REBUILT"));
+  assert.equal(
+    result.diagnostics.some(
+      (item) =>
+        item.code === "V2_UNMAPPED_FIELD" &&
+        (item.path.endsWith(".roiShape") || item.path.endsWith(".roiBitmap")),
+    ),
+    false,
+  );
+});
+
+test("blocks malformed, inconsistent, and out-of-range V2 ROI data", () => {
+  const conflicting = clsProject();
+  Object.assign(conflicting.project as Record<string, unknown>, {
+    roiMode: "simple",
+    roiPosX: 0.1,
+    roiPosY: 0.2,
+    roiWidth: 0.8,
+    roiHeight: 0.9,
+    roiShape: serializedRectangleRoiShape(0.25, 0.2, 0.8, 0.9),
+  });
+  const conflictResult = parseV2SubvisionProject({
+    jsonText: JSON.stringify(conflicting),
+  });
+  assert.equal(conflictResult.ok, true);
+  assert.equal(conflictResult.compatibility.status, "blocked");
+  assert.ok(
+    conflictResult.diagnostics.some((item) => item.code === "V2_ROI_SHAPE_CONFLICT"),
+  );
+
+  const invalidBitmap = clsProject();
+  Object.assign(invalidBitmap.project as Record<string, unknown>, {
+    roiMode: "simple",
+    roiPosX: 0.1,
+    roiPosY: 0.2,
+    roiWidth: 0.8,
+    roiHeight: 0.9,
+    roiShapeType: "rectangle",
+    roiBitmap: "not-a-png",
+  });
+  const bitmapResult = parseV2SubvisionProject({
+    jsonText: JSON.stringify(invalidBitmap),
+  });
+  assert.equal(bitmapResult.ok, true);
+  assert.equal(bitmapResult.compatibility.status, "blocked");
+  assert.ok(
+    bitmapResult.diagnostics.some((item) => item.code === "V2_ROI_BITMAP_INVALID"),
+  );
+
+  const invalidBounds = clsProject();
+  Object.assign(invalidBounds.project as Record<string, unknown>, {
+    roiMode: "simple",
+    roiPosX: 0.8,
+    roiPosY: 0.2,
+    roiWidth: 0.1,
+    roiHeight: 0.9,
+    roiShapeType: "rectangle",
+  });
+  const boundsResult = parseV2SubvisionProject({
+    jsonText: JSON.stringify(invalidBounds),
+  });
+  assert.equal(boundsResult.ok, true);
+  assert.equal(boundsResult.compatibility.status, "blocked");
+  assert.ok(
+    boundsResult.diagnostics.some((item) => item.code === "V2_ROI_BOUNDS_INVALID"),
+  );
+});
+
+test("blocks unsupported Konva group and rectangle transforms", async (t) => {
+  const cases = [
+    {
+      name: "group offset",
+      mutate(group: Record<string, unknown>) {
+        const attrs = group.attrs as Record<string, unknown>;
+        attrs.offsetX = 1;
+      },
+    },
+    {
+      name: "rectangle rotation",
+      mutate(group: Record<string, unknown>) {
+        const child = (group.children as Array<Record<string, unknown>>)[0]!;
+        const attrs = child.attrs as Record<string, unknown>;
+        attrs.rotation = 1;
+      },
+    },
+    {
+      name: "non-rectangle UI type",
+      mutate(group: Record<string, unknown>) {
+        const attrs = group.attrs as Record<string, unknown>;
+        attrs.UIType = "ellipse-roi";
+      },
+    },
+  ] as const;
+
+  for (const item of cases) {
+    await t.test(item.name, () => {
+      const fixture = clsProject();
+      const shape = JSON.parse(
+        serializedRectangleRoiShape(0.1, 0.2, 0.8, 0.9),
+      ) as { children: Array<Record<string, unknown>> };
+      const group = shape.children.find((node) => node.className === "Group")!;
+      item.mutate(group);
+      Object.assign(fixture.project as Record<string, unknown>, {
+        roiMode: "simple",
+        roiPosX: 0.1,
+        roiPosY: 0.2,
+        roiWidth: 0.8,
+        roiHeight: 0.9,
+        roiShape: JSON.stringify(shape),
+      });
+
+      const result = parseV2SubvisionProject({
+        jsonText: JSON.stringify(fixture),
+      });
+      assert.equal(result.ok, true);
+      if (!result.ok) return;
+      assert.equal(result.compatibility.status, "blocked");
+      assert.ok(
+        result.diagnostics.some((entry) => entry.code === "V2_ROI_SHAPE_INVALID"),
+      );
+    });
+  }
 });
 
 test("recognizes common native audit fields without per-entity unknown warnings", () => {
@@ -909,6 +1115,10 @@ test("parses the native V2 2.7.8 classification golden without blocking", () => 
   assert.equal(result.compatibility.status, "confirmation-required");
   assert.equal(result.project.files.length, 2);
   assert.equal(result.project.classes.length, 8);
+  assert.deepEqual(
+    result.project.files.map((file) => file.canonicalSplit),
+    ["training", "validation"],
+  );
   assert.equal(
     result.project.files.reduce((count, file) => count + file.labels.length, 0),
     2,
