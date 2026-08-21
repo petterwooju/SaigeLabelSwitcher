@@ -37,7 +37,7 @@ import {
   PROJECT_JSON_MAX_VALUES,
   PROJECT_STRUCTURE_MAX_DEPTH,
   projectDiagnosticsAreTruncated,
-  PROJECT_TEXT_MAX_BYTES,
+  V2_PROJECT_TEXT_MAX_BYTES,
   V2_PROJECT_LIMITS,
 } from "../security/resourceLimits.ts";
 
@@ -391,15 +391,18 @@ function preflightJsonText(
   path: string,
   enforceTextLimit = true,
 ): boolean {
-  if (enforceTextLimit && exceedsUtf8ByteLimit(text, PROJECT_TEXT_MAX_BYTES)) {
+  if (
+    enforceTextLimit &&
+    exceedsUtf8ByteLimit(text, V2_PROJECT_TEXT_MAX_BYTES)
+  ) {
     addDiagnostic(context, {
       code: "V2_TEXT_LIMIT_EXCEEDED",
       category: "security",
       severity: "error",
       disposition: "block",
       path,
-      message: `V2 JSON exceeds the ${PROJECT_TEXT_MAX_BYTES}-byte UTF-8 text limit.`,
-      details: { maxBytes: PROJECT_TEXT_MAX_BYTES },
+      message: `V2 JSON exceeds the ${V2_PROJECT_TEXT_MAX_BYTES}-byte UTF-8 text limit.`,
+      details: { maxBytes: V2_PROJECT_TEXT_MAX_BYTES },
     });
     return false;
   }

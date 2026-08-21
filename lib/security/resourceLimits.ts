@@ -4,7 +4,10 @@ import type {
   ProjectIR,
 } from "../model/project.ts";
 
-export const PROJECT_TEXT_MAX_BYTES = 16 * 1024 ** 2;
+/** V1 XML can be materially larger than the equivalent V2 JSON because every
+ * contour point is represented by an element with two attributes. */
+export const V1_PROJECT_TEXT_MAX_BYTES = 32 * 1024 ** 2;
+export const V2_PROJECT_TEXT_MAX_BYTES = 16 * 1024 ** 2;
 export const MATERIALIZED_BINARY_MAX_BYTES = 64 * 1024 ** 2;
 
 export const PROJECT_STRUCTURE_MAX_DEPTH = 128;
@@ -23,14 +26,15 @@ export const PROJECT_JSON_MAX_VALUES = 1_000_000;
 export const PROJECT_FILE_MAX_COUNT = 19_996;
 
 export const V1_PROJECT_LIMITS = Object.freeze({
-  maxNodes: 250_000,
+  maxNodes: 524_288,
   // Segmentation contours store every point as <Point X="…" Y="…"/>.
   // Keep a document-wide ceiling for memory safety, while allowing normal
   // contour-heavy projects to exceed the much smaller per-element limit.
-  maxAttributes: 524_288,
+  maxAttributes: 1_048_576,
   maxAttributesPerElement: 64,
   maxClasses: 10_000,
   maxFiles: PROJECT_FILE_MAX_COUNT,
+  maxContourPoints: 500_000,
 });
 
 export const V2_PROJECT_LIMITS = Object.freeze({
@@ -39,7 +43,9 @@ export const V2_PROJECT_LIMITS = Object.freeze({
   maxDatasets: 1_024,
   maxLabels: 250_000,
   maxSplitMemberships: 250_000,
-  maxContourPoints: 250_000,
+  // Kept symmetric with V1 so an accepted V1 project can always be converted
+  // to V2 without a second, stricter geometry gate.
+  maxContourPoints: 500_000,
 });
 
 /** Count canonical polygon points without allowing a hostile project to
@@ -72,7 +78,9 @@ export const BROWSER_ARCHIVE_LIMITS = Object.freeze({
   maxEntryBytes: 4 * 1024 ** 3,
   maxTotalBytes: 32 * 1024 ** 3,
   maxCompressionRatio: 200,
-  maxTextBytes: PROJECT_TEXT_MAX_BYTES,
+  // ZIP text reads default to the V2/manifest ceiling. The only larger text
+  // entry, an SVPA .srproj, is read with an explicit V1 ceiling.
+  maxTextBytes: V2_PROJECT_TEXT_MAX_BYTES,
   maxBlobBytes: MATERIALIZED_BINARY_MAX_BYTES,
   maxEntryNameBytes: 4 * 1024,
   maxTotalEntryNameBytes: 8 * 1024 ** 2,

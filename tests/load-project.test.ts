@@ -12,6 +12,10 @@ import {
   ProjectLoadError,
   loadProject,
 } from "../lib/input/loadProject.ts";
+import {
+  V1_PROJECT_TEXT_MAX_BYTES,
+  V2_PROJECT_TEXT_MAX_BYTES,
+} from "../lib/security/resourceLimits.ts";
 
 const imagePath = String.raw`C:\dataset\ok.png`;
 
@@ -84,6 +88,18 @@ async function makeZip(entries: readonly (readonly [string, string])[]): Promise
   return sink.getData();
 }
 
+async function makeStoredZip(
+  entries: readonly (readonly [string, string])[],
+): Promise<Blob> {
+  const sink = new BlobWriter("application/zip");
+  const writer = new ZipWriter(sink, { useWebWorkers: false });
+  for (const [name, text] of entries) {
+    await writer.add(name, new TextReader(text), { level: 0 });
+  }
+  await writer.close();
+  return sink.getData();
+}
+
 function svpaManifest(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
     ProjectFile: "项目/demo.srproj",
@@ -97,6 +113,24 @@ function svpaManifest(overrides: Record<string, unknown> = {}): string {
     ...overrides,
   });
 }
+
+test("loads a legacy SVPA manifest that omits OriginalProjectDirectory", async () => {
+  const manifest = svpaManifest({ OriginalProjectDirectory: undefined });
+  const zip = await makeZip([
+    ["svpa_manifest.json", manifest],
+    ["项目/demo.srproj", srproj],
+    ["图像/dataset/ok.png", "image"],
+  ]);
+  const loaded = await loadProject(browserFile([zip], "legacy-no-base.zip"));
+  try {
+    assert.equal(loaded.parseResult.ok, true);
+    assert.equal(loaded.svpaManifest?.OriginalProjectDirectory, "");
+    assert.equal(loaded.project?.files[0]?.sourcePath, "C:/dataset/ok.png");
+    assert.equal(loaded.project?.files[0]?.image.kind, "archive");
+  } finally {
+    await loaded.close();
+  }
+});
 
 function srprojForPaths(paths: readonly string[]): string {
   const images = paths
@@ -155,6 +189,63 @@ test("loads plain subvision JSON by content", async () => {
   assert.equal(loaded.project?.source.format, "v2-subvisionproj");
   assert.equal(loaded.project?.files[0].image.kind, "external");
   await loaded.close();
+});
+
+test("applies the larger V1 XML limit only after plain-text content detection", async () => {
+  const srprojBytes = new TextEncoder().encode(srproj).byteLength;
+  const largeXml =
+    srproj +
+    " ".repeat(V2_PROJECT_TEXT_MAX_BYTES - srprojBytes + 1);
+  const largeXmlBytes =
+    srprojBytes + (V2_PROJECT_TEXT_MAX_BYTES - srprojBytes + 1);
+  assert.ok(largeXmlBytes > V2_PROJECT_TEXT_MAX_BYTES);
+  assert.ok(largeXmlBytes <= V1_PROJECT_TEXT_MAX_BYTES);
+
+  // The misleading suffix proves that content, rather than extension, selects
+  // the 32 MiB V1 allowance.
+  const loaded = await loadProject(
+    browserFile([largeXml], "large-xml.subvisionproj"),
+  );
+  try {
+    assert.equal(loaded.format, "v1-srproj");
+    assert.equal(loaded.parseResult.ok, true);
+  } finally {
+    await loaded.close();
+  }
+
+  const json = v2Project(String.raw`C:\dataset\ok.png`);
+  const jsonBytes = new TextEncoder().encode(json).byteLength;
+  const oversizedJson =
+    json +
+    " ".repeat(V2_PROJECT_TEXT_MAX_BYTES - jsonBytes + 1);
+  await assert.rejects(
+    loadProject(browserFile([oversizedJson], "large-json.srproj")),
+    (error: unknown) =>
+      error instanceof ProjectLoadError &&
+      error.code === "PROJECT_TEXT_TOO_LARGE" &&
+      error.details?.maximum === V2_PROJECT_TEXT_MAX_BYTES &&
+      error.details?.detectedFormat === "v2-subvisionproj",
+  );
+});
+
+test("reads an SVPA srproj above 16 MiB with the explicit V1 archive limit", async () => {
+  const srprojBytes = new TextEncoder().encode(srproj).byteLength;
+  const largeXml =
+    srproj +
+    " ".repeat(V2_PROJECT_TEXT_MAX_BYTES - srprojBytes + 1);
+  const zip = await makeStoredZip([
+    ["svpa_manifest.json", svpaManifest()],
+    ["项目/demo.srproj", largeXml],
+    ["图像/dataset/ok.png", "image"],
+  ]);
+  const loaded = await loadProject(browserFile([zip], "large-v1.zip"));
+  try {
+    assert.equal(loaded.format, "v1-svpa");
+    assert.equal(loaded.parseResult.ok, true);
+    assert.equal(loaded.projectXmlText?.length, largeXml.length);
+  } finally {
+    await loaded.close();
+  }
 });
 
 test("loads vision ZIP without inflating image bytes", async () => {

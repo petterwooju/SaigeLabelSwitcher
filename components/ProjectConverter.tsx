@@ -107,6 +107,7 @@ const uiCopy = {
     multiple: "一次只能转换一个项目文件。",
     blocked: "该项目包含目标版本无法安全表示的内容，因此没有生成文件。",
     invalid: "项目文件已损坏或内容不完整，无法安全读取。",
+    projectScaleLimit: "这不表示项目文件已损坏；文件规模或复杂度超过当前安全处理上限，暂时无法在浏览器中转换。",
     unsupported: `v${APP_VERSION} 仅支持 Classification 和多边形 Segmentation；该项目类型留待后续版本。`,
     emptyProject: "项目中没有图片，当前没有可安全生成的目标格式。",
     detection: "检测 (Detection)",
@@ -161,6 +162,7 @@ const uiCopy = {
     multiple: "Choose exactly one project file at a time.",
     blocked: "The project contains data that cannot be represented safely in the target version.",
     invalid: "The project file is damaged or incomplete and could not be read safely.",
+    projectScaleLimit: "This does not mean the project file is damaged. Its size or complexity exceeds the current safe processing limit, so it cannot yet be converted in the browser.",
     unsupported: `v${APP_VERSION} supports only Classification and polygon Segmentation; this project type is planned for a later release.`,
     emptyProject: "The project contains no images, so no target format can be created safely.",
     detection: "Detection",
@@ -215,6 +217,7 @@ const uiCopy = {
     multiple: "프로젝트 파일을 한 번에 하나만 선택하세요.",
     blocked: "대상 버전에서 안전하게 표현할 수 없는 데이터가 포함되어 있습니다.",
     invalid: "프로젝트 파일이 손상되었거나 불완전하여 안전하게 읽을 수 없습니다.",
+    projectScaleLimit: "프로젝트 파일이 손상되었다는 의미는 아닙니다. 파일 크기나 복잡도가 현재 안전 처리 한도를 초과하여 아직 브라우저에서 변환할 수 없습니다.",
     unsupported: `v${APP_VERSION}은 Classification 및 다각형 Segmentation만 지원합니다. 이 프로젝트 유형은 이후 버전에서 지원할 예정입니다.`,
     emptyProject: "프로젝트에 이미지가 없어 안전하게 만들 수 있는 대상 형식이 없습니다.",
     detection: "검출 (Detection)",
@@ -1512,6 +1515,9 @@ function runtimeMessageForCode(
 ): string | undefined {
   switch (code) {
     case "INPUT_COUNT_INVALID": return copy.multiple;
+    case "PROJECT_TEXT_TOO_LARGE":
+    case "V1_TEXT_LIMIT_EXCEEDED":
+    case "V2_TEXT_LIMIT_EXCEEDED": return copy.projectScaleLimit;
     case "PROJECT_PARSE_FAILED":
     case "INPUT_FORMAT_UNKNOWN": return copy.invalid;
     case "PROJECT_EMPTY": return copy.emptyProject;
@@ -1544,8 +1550,25 @@ function runtimeMessageForCode(
     case "HELPER_INTEGRITY_FAILED": return copy.helperIntegrityFailed;
     case "SAVE_FAILED": return copy.saveFailed;
     default:
+      if (isProjectScaleLimitCode(code)) return copy.projectScaleLimit;
       return code.startsWith("ZIP_") ? copy.invalid : undefined;
   }
+}
+
+const ZIP_PROJECT_SCALE_LIMIT_CODES = new Set([
+  "ZIP_BLOB_TOO_LARGE",
+  "ZIP_ENTRY_NAME_TOO_LONG",
+  "ZIP_ENTRY_NAMES_TOO_LARGE",
+  "ZIP_ENTRY_TOO_LARGE",
+  "ZIP_PREFIX_TOO_LARGE",
+  "ZIP_TEXT_TOO_LARGE",
+  "ZIP_TOO_MANY_ENTRIES",
+  "ZIP_TOTAL_TOO_LARGE",
+]);
+
+function isProjectScaleLimitCode(code: string): boolean {
+  return ZIP_PROJECT_SCALE_LIMIT_CODES.has(code) ||
+    /^(?:V1|V2|PROJECT)_[A-Z0-9_]*(?:LIMIT_EXCEEDED|TOO_LARGE)$/u.test(code);
 }
 
 function toUiDiagnostic(
@@ -1573,6 +1596,9 @@ function localizedProjectDiagnosticMessage(
 ): string {
   if (item.code === "V2_EXTERNAL_PATH_RELATIVE") {
     return uiCopy[language].relativeV1Path;
+  }
+  if (isProjectScaleLimitCode(item.code)) {
+    return uiCopy[language].projectScaleLimit;
   }
   if (language === "en") return item.message;
   const copy = uiCopy[language];

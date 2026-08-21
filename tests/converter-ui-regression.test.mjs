@@ -116,6 +116,29 @@ test("localizes permission fallbacks, save picker descriptions, and raw diagnost
   assert.match(converter, /relativePathConfirmation/);
 });
 
+test("describes project resource limits without claiming that the source is damaged", async () => {
+  const { converter } = await readUiSources();
+
+  assert.equal((converter.match(/projectScaleLimit:/g) ?? []).length, 3);
+  assert.match(
+    converter,
+    /case "PROJECT_TEXT_TOO_LARGE":[\s\S]*?case "V1_TEXT_LIMIT_EXCEEDED":[\s\S]*?case "V2_TEXT_LIMIT_EXCEEDED": return copy\.projectScaleLimit/,
+  );
+  assert.match(
+    converter,
+    /if \(isProjectScaleLimitCode\(code\)\) return copy\.projectScaleLimit;[\s\S]*?code\.startsWith\("ZIP_"\)/,
+  );
+  assert.match(
+    converter,
+    /if \(isProjectScaleLimitCode\(item\.code\)\) \{[\s\S]*?return uiCopy\[language\]\.projectScaleLimit;[\s\S]*?\}[\s\S]*?if \(language === "en"\) return item\.message/,
+  );
+  assert.match(converter, /ZIP_TEXT_TOO_LARGE/);
+  assert.match(converter, /ZIP_TOTAL_TOO_LARGE/);
+  assert.match(converter, /这不表示项目文件已损坏/);
+  assert.match(converter, /This does not mean the project file is damaged/);
+  assert.match(converter, /프로젝트 파일이 손상되었다는 의미는 아닙니다/);
+});
+
 test("separates blocking conversion failures from retryable source and I/O errors", async () => {
   const { converter } = await readUiSources();
 

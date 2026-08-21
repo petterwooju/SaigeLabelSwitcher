@@ -19,6 +19,14 @@ const verifiedMasking = String.raw`  <MaskingParameter>
     </BlindGroup>
   </MaskingParameter>`;
 
+const verifiedDisabledMaskingWithDefaults = verifiedMasking.replace(
+  "<Type>Simple</Type>",
+  "<Type>Not set</Type>",
+).replace(
+  'X="0.07332293" Y="0.1560062" Width="0.8439937" Height="0.74883"',
+  'X="0" Y="0" Width="1" Height="1"',
+);
+
 function fixture(masking = verifiedMasking): string {
   return String.raw`<?xml version="1.0" encoding="utf-8"?>
 <Project>
@@ -113,6 +121,74 @@ test("retains the verified disabled masking form in the structured ROI", () => {
     xml,
     /<MaskingParameter>\s*<Type>Not set<\/Type>\s*<\/MaskingParameter>/u,
   );
+});
+
+test("blocks text hidden beside a disabled masking type", () => {
+  const result = parseV1Srproj(
+    fixture(
+      "  <MaskingParameter>unexpected<Type>Not set</Type></MaskingParameter>",
+    ),
+  );
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "V1_ROI_ELEMENT_TEXT_INVALID" &&
+        diagnostic.disposition === "block",
+    ),
+  );
+});
+
+test("accepts a disabled ROI that retains the verified full default subtree", () => {
+  const result = parseV1Srproj(fixture(verifiedDisabledMaskingWithDefaults));
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.project.project.roi, { mode: "none" });
+  assert.equal(result.project.project.roiMode, "no");
+  assert.equal(result.compatibility.status, "compatible");
+  assert.equal(
+    result.diagnostics.some(
+      (diagnostic) => diagnostic.code === "V1_ROI_STRUCTURE_UNSUPPORTED",
+    ),
+    false,
+  );
+});
+
+test("blocks non-default or extended subtrees retained under a disabled ROI", async (t) => {
+  const cases = [
+    {
+      name: "non-full rectangle",
+      masking: verifiedDisabledMaskingWithDefaults.replace('Width="1"', 'Width="0.9"'),
+      code: "V1_ROI_SETTING_UNSUPPORTED",
+    },
+    {
+      name: "non-default intensity",
+      masking: verifiedDisabledMaskingWithDefaults.replace('Min="0"', 'Min="1"'),
+      code: "V1_ROI_SETTING_UNSUPPORTED",
+    },
+    {
+      name: "unknown retained node",
+      masking: verifiedDisabledMaskingWithDefaults.replace(
+        "    <BlindGroup>",
+        "    <Feather Value=\"1\" />\n    <BlindGroup>",
+      ),
+      code: "V1_ROI_STRUCTURE_UNSUPPORTED",
+    },
+  ] as const;
+
+  for (const item of cases) {
+    await t.test(item.name, () => {
+      const result = parseV1Srproj(fixture(item.masking));
+      assert.equal(result.ok, true);
+      assert.equal(result.compatibility.status, "blocked");
+      assert.ok(
+        result.diagnostics.some(
+          (diagnostic) =>
+            diagnostic.code === item.code && diagnostic.disposition === "block",
+        ),
+      );
+    });
+  }
 });
 
 test("blocks every unverified active V1 ROI form without a confirmed-loss bypass", async (t) => {
