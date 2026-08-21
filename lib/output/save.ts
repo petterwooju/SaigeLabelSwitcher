@@ -50,7 +50,16 @@ export class BrowserCapabilityError extends Error {
   }
 }
 
-const MAX_BLOB_FALLBACK_BYTES = 500 * 1024 ** 2;
+export const MAX_BLOB_FALLBACK_BYTES = 500 * 1024 ** 2;
+
+export interface SaveDestinationOptions {
+  /**
+   * Skip the system picker and finish with the browser download path. This is
+   * useful when asynchronous preparation could fail after Chromium has already
+   * created an empty placeholder at the selected destination.
+   */
+  readonly preferDownload?: boolean;
+}
 
 /**
  * Call this synchronously from the user's click handler. Chromium requires the
@@ -59,7 +68,9 @@ const MAX_BLOB_FALLBACK_BYTES = 500 * 1024 ** 2;
 export async function requestSaveDestination(
   fileName: string,
   type: SaveFileType,
+  options: SaveDestinationOptions = {},
 ): Promise<SaveDestination> {
+  if (options.preferDownload) return { fileName };
   const picker = (window as SavePickerWindow).showSaveFilePicker;
   if (!picker) return { fileName };
 
@@ -218,12 +229,20 @@ export function requiresZip64(estimatedBytes: number, estimatedEntries: number):
 }
 
 export function ensureBlobFallbackIsSafe(bytes: number): void {
-  if (bytes > MAX_BLOB_FALLBACK_BYTES) {
+  if (!isBlobFallbackSafe(bytes)) {
     throw new BrowserCapabilityError(
       "BLOB_FALLBACK_TOO_LARGE",
       "项目过大，当前浏览器无法安全地在内存中完成下载。请使用最新版桌面 Edge 或 Chrome。",
     );
   }
+}
+
+export function isBlobFallbackSafe(bytes: number): boolean {
+  return (
+    Number.isSafeInteger(bytes) &&
+    bytes >= 0 &&
+    bytes <= MAX_BLOB_FALLBACK_BYTES
+  );
 }
 
 function triggerBlobDownload(blob: Blob, fileName: string): void {

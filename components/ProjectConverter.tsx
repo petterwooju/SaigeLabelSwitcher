@@ -71,6 +71,7 @@ import {
   type ContainerProgress,
 } from "../lib/output/containers.ts";
 import {
+  isBlobFallbackSafe,
   requestSaveDestination,
   SaveCancelledError,
   saveText,
@@ -78,6 +79,8 @@ import {
   type SaveFileType,
   type SaveResult,
 } from "../lib/output/save.ts";
+import { EXPECTED_HELPER_SIZE } from "../lib/security/helperIntegrity.ts";
+import { PROJECT_TEXT_MAX_BYTES } from "../lib/security/resourceLimits.ts";
 import { writeSrproj } from "../lib/output/srproj.ts";
 import {
   writeV2SubvisionProject,
@@ -89,6 +92,13 @@ const localeByLanguage: Record<ConverterLanguage, AppLanguage> = {
   en: "en-US",
   ko: "ko-KR",
 };
+
+// Reserve enough room for the generated srproj, manifest, instructions,
+// helper, central directory, and other ZIP metadata. Small SVPA packages use
+// the browser download path so an asynchronous preflight failure cannot leave
+// a 0-byte file created by the system save picker.
+const SVPA_BLOB_DOWNLOAD_RESERVE_BYTES =
+  EXPECTED_HELPER_SIZE + PROJECT_TEXT_MAX_BYTES * 3 + 8 * 1024 ** 2;
 
 const uiCopy = {
   zh: {
@@ -131,6 +141,8 @@ const uiCopy = {
     imageTooLarge: "图片尺寸超过安全处理上限。",
     imageReadFailed: "无法安全读取部分项目图片。",
     saveFailed: "转换未完成，源文件未被修改。",
+    helperLoadFailed: "无法读取路径修复工具。请检查网络连接后重试。",
+    helperIntegrityFailed: "路径修复工具校验失败。请刷新页面后重试。",
     savePickerDownloadFallback: "无法打开系统保存位置选择器，已改用浏览器下载。",
     blobFallbackTooLarge: "项目过大，当前浏览器无法安全地在内存中完成下载。请使用最新版桌面 Edge 或 Chrome。",
     confirmation: "目标版本无法保留上方列出的部分源字段；确认后将按已验证的核心字段转换。",
@@ -180,6 +192,8 @@ const uiCopy = {
     imageTooLarge: "An image exceeds the safe dimension limit.",
     imageReadFailed: "Some project images could not be read safely.",
     saveFailed: "Conversion did not finish. The source file was not changed.",
+    helperLoadFailed: "The path repair helper could not be loaded. Check the network connection and try again.",
+    helperIntegrityFailed: "The path repair helper failed its integrity check. Refresh the page and try again.",
     savePickerDownloadFallback: "The system save-location picker was unavailable, so the browser download fallback will be used.",
     blobFallbackTooLarge: "This project is too large for a safe in-memory browser download. Use the latest desktop Edge or Chrome.",
     confirmation: "Some source fields listed above cannot be retained in the target version. Confirm to continue with the verified core fields.",
@@ -229,6 +243,8 @@ const uiCopy = {
     imageTooLarge: "이미지 크기가 안전 처리 한도를 초과합니다.",
     imageReadFailed: "일부 프로젝트 이미지를 안전하게 읽을 수 없습니다.",
     saveFailed: "변환이 완료되지 않았으며 원본 파일은 변경되지 않았습니다.",
+    helperLoadFailed: "경로 복구 도구를 읽지 못했습니다. 네트워크 연결을 확인한 후 다시 시도하세요.",
+    helperIntegrityFailed: "경로 복구 도구 무결성 검사에 실패했습니다. 페이지를 새로 고친 후 다시 시도하세요.",
     savePickerDownloadFallback: "시스템 저장 위치 선택기를 열 수 없어 브라우저 다운로드 방식으로 전환했습니다.",
     blobFallbackTooLarge: "이 프로젝트는 브라우저 메모리 다운로드로 안전하게 처리하기에는 너무 큽니다. 최신 데스크톱 Edge 또는 Chrome을 사용하세요.",
     confirmation: "대상 버전에서 위의 일부 원본 필드를 유지할 수 없습니다. 검증된 핵심 필드로 계속하려면 확인하세요.",
@@ -896,11 +912,29 @@ export function ProjectConverter() {
       };
       const originalProject = loaded.project;
       const fileName = outputFileName(originalProject, target);
+      const preparedResolution = needsImageAccess
+        ? resolveProjectImages(
+            originalProject,
+            loaded.archive,
+            matchReport ?? undefined,
+          )
+        : undefined;
+      const preferDownload = Boolean(
+        target === "svpa-zip" &&
+          preparedResolution?.complete &&
+          isBlobFallbackSafe(
+            preparedResolution.totalBytes + SVPA_BLOB_DOWNLOAD_RESERVE_BYTES,
+          ),
+      );
       let destination: SaveDestination;
       try {
-        updateProgress({ stage: "choosing-save-location" });
+        updateProgress({
+          stage: preferDownload ? "converting" : "choosing-save-location",
+        });
         destination = await waitForAbortable(
-          requestSaveDestination(fileName, saveType(target, language)),
+          requestSaveDestination(fileName, saveType(target, language), {
+            preferDownload,
+          }),
           signal,
         );
       } catch (error) {
@@ -937,9 +971,9 @@ export function ProjectConverter() {
       updateProgress({ stage: "converting" });
       try {
         let workingProject = originalProject;
-        let resolved: ResolvedImageSet | undefined;
+        let resolved: ResolvedImageSet | undefined = preparedResolution;
         if (needsImageAccess) {
-          resolved = resolveProjectImages(
+          resolved ??= resolveProjectImages(
             originalProject,
             loaded.archive,
             matchReport ?? undefined,
@@ -1468,6 +1502,8 @@ function runtimeMessageForCode(
     case "IMAGE_DIMENSIONS_INVALID": return copy.imageReadFailed;
     case "SAVE_PICKER_DOWNLOAD_FALLBACK": return copy.savePickerDownloadFallback;
     case "BLOB_FALLBACK_TOO_LARGE": return copy.blobFallbackTooLarge;
+    case "HELPER_LOAD_FAILED": return copy.helperLoadFailed;
+    case "HELPER_INTEGRITY_FAILED": return copy.helperIntegrityFailed;
     case "SAVE_FAILED": return copy.saveFailed;
     default:
       return code.startsWith("ZIP_") ? copy.invalid : undefined;
