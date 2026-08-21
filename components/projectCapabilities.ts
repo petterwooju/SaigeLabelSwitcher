@@ -60,6 +60,9 @@ export function targetIncludesDiagnostic(
   diagnostic: Pick<ProjectDiagnostic, "code" | "details">,
   target: ProjectOutputFormat | null,
 ): boolean {
+  if (target && !diagnosticAppliesToTarget(diagnostic.details, target)) {
+    return false;
+  }
   if (NON_ACTIONABLE_V2_TO_V1_DIAGNOSTICS.has(diagnostic.code)) return false;
   if (
     diagnostic.code === "V1_UNMAPPED_XML_NODE" &&
@@ -70,6 +73,15 @@ export function targetIncludesDiagnostic(
     return false;
   }
   return !(target === "svpa-zip" && diagnostic.code === "V2_EXTERNAL_PATH_RELATIVE");
+}
+
+function diagnosticAppliesToTarget(
+  details: ProjectDiagnostic["details"],
+  target: ProjectOutputFormat,
+): boolean {
+  const scopedTargets = details?.blockedTargets ?? details?.affectedTargets;
+  if (!Array.isArray(scopedTargets)) return true;
+  return scopedTargets.some((value) => value === target);
 }
 
 export function targetNeedsConfirmation(

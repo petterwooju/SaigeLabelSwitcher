@@ -157,9 +157,37 @@ test("verified routine V1 settings stay in technical diagnostics without prompti
   assert.equal(targetConfirmationMode([unknownNode], "visionproj"), "loss");
 });
 
+test("parser diagnostics apply only to the output targets named in their details", () => {
+  const blockedForV2 = {
+    code: "V1_SEGMENTATION_OK_CLASS_RESERVED_IN_V2",
+    disposition: "block" as const,
+    details: { blockedTargets: ["visionproj", "subvisionproj"] },
+  };
+  const alphaLossForV2 = {
+    code: "V1_CLASS_COLOR_ALPHA_NOT_IN_V2",
+    disposition: "degrade" as const,
+    details: { affectedTargets: ["visionproj", "subvisionproj"] },
+  };
+
+  for (const target of ["visionproj", "subvisionproj"] as const) {
+    assert.equal(targetIncludesDiagnostic(blockedForV2, target), true);
+    assert.equal(targetIncludesDiagnostic(alphaLossForV2, target), true);
+    assert.equal(targetNeedsConfirmation([alphaLossForV2], target), true);
+  }
+  for (const target of ["svpa-zip", "srproj"] as const) {
+    assert.equal(targetIncludesDiagnostic(blockedForV2, target), false);
+    assert.equal(targetIncludesDiagnostic(alphaLossForV2, target), false);
+    assert.equal(targetNeedsConfirmation([alphaLossForV2], target), false);
+  }
+});
+
 test("ProjectConverter uses the capability matrix for loading and rendering", async () => {
   const source = await readFile(
     new URL("../components/ProjectConverter.tsx", import.meta.url),
+    "utf8",
+  );
+  const saveService = await readFile(
+    new URL("../lib/output/conversionSave.ts", import.meta.url),
     "utf8",
   );
 
@@ -179,9 +207,18 @@ test("ProjectConverter uses the capability matrix for loading and rendering", as
   assert.doesNotMatch(source, /class folder structure/);
   assert.doesNotMatch(source, /类别文件夹结构/);
   assert.doesNotMatch(source, /클래스 폴더 구조/);
-  assert.match(source, /v0\.0\.1 仅支持 Classification 和多边形 Segmentation/);
-  assert.match(source, /v0\.0\.1 supports only Classification and polygon Segmentation/);
-  assert.match(source, /v0\.0\.1은 Classification 및 다각형 Segmentation만 지원/);
+  assert.match(
+    source,
+    /unsupported: `v\$\{APP_VERSION\} 仅支持 Classification 和多边形 Segmentation/,
+  );
+  assert.match(
+    source,
+    /unsupported: `v\$\{APP_VERSION\} supports only Classification and polygon Segmentation/,
+  );
+  assert.match(
+    source,
+    /unsupported: `v\$\{APP_VERSION\}은 Classification 및 다각형 Segmentation만 지원/,
+  );
   assert.match(source, /disabled: format === "subvisionproj" && projectHasRelativePaths/);
   assert.match(source, /relativePathConfirmation/);
   assert.equal((source.match(/mixedConfirmation:/g) ?? []).length, 3);
@@ -189,10 +226,14 @@ test("ProjectConverter uses the capability matrix for loading and rendering", as
   assert.match(source, /confirmationMode === "mixed"/);
   assert.match(
     source,
-    /target === "srproj"[\s\S]*?allowConfirmedLoss: confirmationChecked \|\| !needsConfirmation/,
+    /prepareConversionOutput\(\{[\s\S]*?allowConfirmedLoss: confirmationChecked \|\| !needsConfirmation/,
   );
   assert.equal(
     (source.match(/allowConfirmedLoss: confirmationChecked \|\| !needsConfirmation/g) ?? []).length,
-    4,
+    1,
+  );
+  assert.match(
+    saveService,
+    /target === "srproj"[\s\S]*?writeSrproj\(workingProject,[\s\S]*?allowConfirmedLoss,/,
   );
 });

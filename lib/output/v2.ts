@@ -22,6 +22,7 @@ import {
   BROWSER_ARCHIVE_LIMITS,
   countProjectContourPoints,
   EXTERNAL_PROJECT_PATH_MAX_BYTES,
+  PROJECT_PATH_MAX_BYTES,
   exceedsUtf8ByteLimit,
   inspectJsonResourceUsage,
   PROJECT_TEXT_MAX_BYTES,
@@ -438,7 +439,7 @@ function validateProjectResourceLimits(
       diagnostics,
       "V2_WRITE_PATH_LIMIT_EXCEEDED",
       "$.files[*]",
-      `${overlongPathCount} V2 path value(s) exceed ${EXTERNAL_PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+      `${overlongPathCount} source path value(s) exceed ${EXTERNAL_PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
     );
     valid = false;
   }
@@ -568,7 +569,7 @@ function validateSameVersionRawResources(
     }
     if (
       typeof file.filePath === "string" &&
-      exceedsUtf8ByteLimit(file.filePath, EXTERNAL_PROJECT_PATH_MAX_BYTES)
+      exceedsUtf8ByteLimit(file.filePath, PROJECT_PATH_MAX_BYTES)
     ) {
       overlongPaths += 1;
     }
@@ -596,7 +597,7 @@ function validateSameVersionRawResources(
       diagnostics,
       "V2_WRITE_RAW_PATH_LIMIT_EXCEEDED",
       "$.raw.project.projectFiles[*].filePath",
-      `${overlongPaths} retained V2 file path(s) exceed ${EXTERNAL_PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+      `${overlongPaths} retained V2 file path(s) exceed ${PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
     );
     valid = false;
   }
@@ -1726,12 +1727,12 @@ function validateExternalPath(
   diagnostics: ProjectDiagnostic[],
 ): string {
   const diagnosticPath = `$.files[${fileIndex}].image`;
-  if (exceedsUtf8ByteLimit(rawPath, EXTERNAL_PROJECT_PATH_MAX_BYTES)) {
+  if (exceedsUtf8ByteLimit(rawPath, PROJECT_PATH_MAX_BYTES)) {
     resourceBlock(
       diagnostics,
       "V2_WRITE_PATH_LIMIT_EXCEEDED",
       diagnosticPath,
-      `A .subvisionproj image path must not exceed ${EXTERNAL_PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+      `A .subvisionproj image path must not exceed ${PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
     );
     return "";
   }

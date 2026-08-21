@@ -21,7 +21,7 @@ test("server-renders the SaigeVision converter shell", async () => {
   const html = await response.text();
   assert.match(html, /<title>SaigeVision 项目转换<\/title>/i);
   assert.match(html, /SaigeVision Project Converter/);
-  assert.match(html, /v0\.0\.1/);
+  assert.match(html, /v0\.0\.2/);
   assert.match(html, /Classification/);
   assert.match(html, /Segmentation/);
   assert.match(
@@ -64,6 +64,6 @@ test("removes starter assets and keeps the converter client-side", async () => {
   assert.match(converter, /"use client"/);
   assert.match(converter, /loadProject/);
   assert.match(converter, /requestSaveDestination/);
-  assert.match(converter, /writeVisionArchive/);
-  assert.match(converter, /writeSvpaArchive/);
+  assert.match(converter, /prepareConversionOutput/);
+  assert.match(converter, /commitPreparedConversionOutput/);
 });

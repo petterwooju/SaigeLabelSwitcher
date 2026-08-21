@@ -1,6 +1,6 @@
 {
   "name": "saigevision-project-converter",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -13,8 +13,11 @@
     "test": "npm run test:unit",
     "test:unit": "node --experimental-strip-types --test tests/*.test.ts tests/converter-ui-regression.test.mjs",
     "test:render": "node --test tests/rendered-html.test.mjs",
+    "test:e2e": "npm run build:pages && npm run test:e2e:prepared",
+    "test:e2e:prepared": "playwright test",
     "test:pages": "npm run build:pages && node --test tests/static-export.test.mjs",
-    "check": "npm run typecheck && npm run lint && npm run test:unit && npm run build && npm run test:render",
+    "check": "npm run verify:release && npm run typecheck && npm run lint && npm run test:unit && npm run build && npm run test:render",
+    "verify:release": "node scripts/verify-release-version.mjs",
     "audit:dependencies": "node scripts/verify-npm-audit.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "typecheck": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('.next', { recursive: true, force: true });\" && tsc --noEmit"
@@ -28,8 +31,8 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.52.1",
     "@eslint/js": "9.39.4",
-    "@next/eslint-plugin-next": "16.2.6",
-    "@tailwindcss/postcss": "4.2.1",
+    "@next/eslint-plugin-next": "16.3.0",
+    "@playwright/test": "1.62.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
@@ -43,7 +46,6 @@
     "globals": "16.4.0",
     "image-size": "file:./vendor/image-size-2.0.3-saige.2.tgz",
     "react-server-dom-webpack": "19.2.8",
-    "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
     "typescript-eslint": "8.59.3",
     "vinext": "1.0.0-beta.2",

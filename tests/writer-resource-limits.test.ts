@@ -15,10 +15,11 @@ import {
   writeV2SubvisionProject,
   writeV2VisionProject,
 } from "../lib/output/v2.ts";
+import { parseV2SubvisionProject } from "../lib/input/v2.ts";
 import {
   ARCHIVE_ENTRY_SEGMENT_MAX_BYTES,
   BROWSER_ARCHIVE_LIMITS,
-  EXTERNAL_PROJECT_PATH_MAX_BYTES,
+  PROJECT_PATH_MAX_BYTES,
   PROJECT_JSON_MAX_VALUES,
   PROJECT_STRUCTURE_MAX_DEPTH,
   PROJECT_TEXT_MAX_BYTES,
@@ -152,9 +153,15 @@ test("V2 writers reject ProjectIR class, file, label, and split count overflows"
 
 test("V2 writers enforce UTF-8 paths before normalization", () => {
   const base = v1Project();
-  const exactPath = `C:\\${"a".repeat(EXTERNAL_PROJECT_PATH_MAX_BYTES - 3)}`;
+  const exactPath = `C:\\${"a".repeat(PROJECT_PATH_MAX_BYTES - 3)}`;
   const exactFile = { ...base.files[0]!, sourcePath: exactPath, normalizedPath: exactPath, image: { kind: "external", path: exactPath } as const };
-  assert.equal(writeV2SubvisionProject({ ...base, files: [exactFile] }).ok, true);
+  const exactResult = writeV2SubvisionProject({ ...base, files: [exactFile] });
+  assert.equal(exactResult.ok, true);
+  assert.equal(
+    exactResult.ok &&
+      parseV2SubvisionProject({ jsonText: exactResult.jsonText }).ok,
+    true,
+  );
 
   const overlong = `${exactPath}a`;
   const result = writeV2SubvisionProject({
@@ -171,7 +178,7 @@ test("V2 writers enforce UTF-8 paths before normalization", () => {
   assert.equal(result.ok, false);
   assert.ok(code(result, "V2_WRITE_PATH_LIMIT_EXCEEDED"));
 
-  const override = `C:\\${"界".repeat(Math.floor(EXTERNAL_PROJECT_PATH_MAX_BYTES / 3) + 1)}`;
+  const override = `C:\\${"界".repeat(Math.floor(PROJECT_PATH_MAX_BYTES / 3) + 1)}`;
   const overrideResult = writeV2SubvisionProject(base, {
     externalPaths: { 0: override },
   });

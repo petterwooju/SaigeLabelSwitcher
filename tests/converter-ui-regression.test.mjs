@@ -5,11 +5,12 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 async function readUiSources() {
-  const [converter, shell] = await Promise.all([
+  const [converter, shell, saveService] = await Promise.all([
     readFile(new URL("components/ProjectConverter.tsx", root), "utf8"),
     readFile(new URL("components/ConverterShell.tsx", root), "utf8"),
+    readFile(new URL("lib/output/conversionSave.ts", root), "utf8"),
   ]);
-  return { converter, shell };
+  return { converter, shell, saveService };
 }
 
 test("filters compatibility diagnostics for the selected target version", async () => {
@@ -19,16 +20,13 @@ test("filters compatibility diagnostics for the selected target version", async 
     converter,
     /item\.category === "compatibility" && !includeCompatibility/,
   );
-  assert.match(
-    converter,
-    /Boolean\(loaded && isCrossVersion\(loaded\.format, target\)\)/,
-  );
+  assert.match(converter, /targetIncludesDiagnostic\(diagnostic, target\)/);
 });
 
 test("preserves save results and guards the complete image verification path", async () => {
-  const { converter, shell } = await readUiSources();
+  const { converter, shell, saveService } = await readUiSources();
 
-  assert.equal((converter.match(/completedSave = await/g) ?? []).length, 4);
+  assert.equal((converter.match(/completedSave = await/g) ?? []).length, 1);
   assert.match(converter, /setSaveResult\(completedSave\)/);
   assert.match(converter, /saveInFlightRef\.current/);
   assert.match(
@@ -38,14 +36,12 @@ test("preserves save results and guards the complete image verification path", a
   assert.doesNotMatch(converter, /enrichProjectImageDimensions/);
   assert.match(shell, /result\.mode === "direct"/);
   assert.match(shell, /result\.fileName/);
-  assert.match(
-    converter,
-    /target === "svpa-zip"[\s\S]*?isBlobFallbackSafe\([\s\S]*?preparedResolution\.totalBytes \+ SVPA_BLOB_DOWNLOAD_RESERVE_BYTES/,
-  );
-  assert.match(
-    converter,
-    /requestSaveDestination\(fileName, saveType\(target, language\), \{[\s\S]*?preferDownload,/,
-  );
+  assert.match(converter, /prepareConversionOutput\(\{/);
+  assert.match(converter, /commitPreparedConversionOutput\(/);
+  assert.match(converter, /isBlobFallbackSafe\(prepared\.estimatedBytes\)/);
+  assert.match(converter, /preparedSaveRef\.current = \{/);
+  assert.match(saveService, /prepareVisionArchive\(\{/);
+  assert.match(saveService, /prepareSvpaArchive\(\{/);
 });
 
 test("keeps language, parse failure, dimension-only copy, and save-picker busy state explicit", async () => {
@@ -64,7 +60,7 @@ test("keeps language, parse failure, dimension-only copy, and save-picker busy s
 });
 
 test("cancels every long operation and clears selected image sources safely", async () => {
-  const { converter, shell } = await readUiSources();
+  const { converter, shell, saveService } = await readUiSources();
 
   assert.match(converter, /beginOperation\("loading-project"\)/);
   assert.match(converter, /loadProject\(sourceFile, \{ signal \}\)/);
@@ -73,9 +69,10 @@ test("cancels every long operation and clears selected image sources safely", as
   assert.match(converter, /beginOperation\("reading-image-zip"\)/);
   assert.match(converter, /beginOperation\("saving"\)/);
   assert.match(converter, /verifyAndEnrichProjectImages[\s\S]*?\{[\s\S]*?signal,/);
-  assert.match(converter, /writeVisionArchive\(\{[\s\S]*?signal,/);
-  assert.match(converter, /writeSvpaArchive\(\{[\s\S]*?signal,/);
-  assert.equal((converter.match(/saveText\([\s\S]*?signal,[\s\S]*?\);/g) ?? []).length >= 2, true);
+  assert.match(converter, /commitPreparedConversionOutput\([\s\S]*?signal,/);
+  assert.match(saveService, /writePreparedVisionArchive\(\{[\s\S]*?signal: options\.signal/);
+  assert.match(saveService, /writePreparedSvpaArchive\(\{[\s\S]*?signal: options\.signal/);
+  assert.match(saveService, /saveBlob\(destination, prepared\.blob, options\.signal\)/);
   assert.match(converter, /operation\?\.controller\.abort\(\)/);
   assert.match(converter, /activeOperationRef\.current\?\.controller\.abort\(\)/);
   assert.match(converter, /selectedImageArchivesRef\.current = new Map\(\)/);
@@ -99,7 +96,7 @@ test("localizes permission fallbacks, save picker descriptions, and raw diagnost
     /case "HELPER_INTEGRITY_FAILED": return copy\.helperIntegrityFailed/,
   );
   assert.match(converter, /isPermissionFallbackError\(error\)/);
-  assert.match(converter, /saveType\(target, language\)/);
+  assert.match(converter, /saveType\(target, operationLanguage\)/);
   assert.match(converter, /satisfies Record<ConverterLanguage, Record<ConverterOutputFormat, string>>/);
   assert.equal((converter.match(/diagnosticTimestampLoss:/g) ?? []).length, 3);
   assert.equal((converter.match(/diagnosticSplitLoss:/g) ?? []).length, 3);
@@ -111,9 +108,28 @@ test("localizes permission fallbacks, save picker descriptions, and raw diagnost
   assert.match(converter, /if \(language === "en"\) return item\.message/);
   assert.equal((converter.match(/imageDimensionsMismatch:/g) ?? []).length, 3);
   assert.equal((converter.match(/imageFormatUnsupported:/g) ?? []).length, 3);
-  assert.match(converter, /localized \?\? copy\.saveFailed/);
+  assert.match(
+    converter,
+    /const message = localized \?\?[\s\S]*?language === "en" && item\.message/,
+  );
   assert.match(converter, /V2_EXTERNAL_PATH_RELATIVE/);
   assert.match(converter, /relativePathConfirmation/);
+});
+
+test("separates blocking conversion failures from retryable source and I/O errors", async () => {
+  const { converter } = await readUiSources();
+
+  assert.match(converter, /hasBlockingRuntimeDiagnostic/);
+  assert.match(converter, /!hasBlockingRuntimeDiagnostic/);
+  assert.match(converter, /blocking: true,[\s\S]*?retryable: false/u);
+  assert.match(
+    converter,
+    /severity: "warning",[\s\S]*?blocking: false,[\s\S]*?retryable: true/u,
+  );
+  assert.match(
+    converter,
+    /return \{ severity: "error", code, blocking: false, retryable: true \}/u,
+  );
 });
 
 test("uses per-instance heading ids and focuses meaningful state transitions", async () => {

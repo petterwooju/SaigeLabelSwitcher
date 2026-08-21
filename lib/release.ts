@@ -1,6 +1,6 @@
 import type { ProjectType } from "./model/project.ts";
 
-export const APP_VERSION = "0.0.1" as const;
+export const APP_VERSION = "0.0.2" as const;
 
 export const SUPPORTED_PROJECT_TYPES = [
   "classification",

@@ -897,6 +897,76 @@ test("accepts a verified native Konva rectangle and derived PNG bitmap", () => {
   );
 });
 
+test("accepts native ROI boundaries derived from Konva rendered client bounds", () => {
+  const fixture = clsProject();
+  const project = fixture.project as Record<string, unknown>;
+  Object.assign(project, {
+    roiMode: "simple",
+    roiPosX: 0.08690908,
+    roiPosY: 0.04729607,
+    roiWidth: 0.91963637,
+    roiHeight: 0.96115625,
+    roiShape: JSON.stringify({
+      attrs: { stageSize: { width: 232.26360153256704, height: 592 } },
+      className: "Layer",
+      children: [
+        {
+          attrs: { isBackground: true, width: 232.26360153256704, height: 592 },
+          className: "Rect",
+        },
+        {
+          attrs: {
+            name: "roi-area",
+            UIType: "roi",
+            x: -2.6426590842169686,
+            y: -38.13495038006761,
+            scaleX: 1.0270901053677566,
+            scaleY: 1.1363268588214488,
+          },
+          className: "Group",
+          children: [
+            {
+              attrs: {
+                x: 23.226360153256703,
+                y: 59.2,
+                width: 185.81088122605362,
+                height: 473.6,
+                fill: "white",
+                strokeWidth: 1,
+              },
+              className: "Rect",
+            },
+            {
+              attrs: {
+                x: 23.226360153256703,
+                y: 59.2,
+                width: 185.81088122605362,
+                height: 473.6,
+                stroke: "white",
+                strokeWidth: 1,
+                shadowColor: "black",
+                shadowBlur: 1,
+                shadowOffsetX: 0.5,
+                shadowOffsetY: 0.5,
+                strokeScaleEnabled: false,
+              },
+              className: "Rect",
+            },
+          ],
+        },
+      ],
+    }),
+  });
+
+  const result = parseV2SubvisionProject({ jsonText: JSON.stringify(fixture) });
+  assert.equal(result.ok, true);
+  assert.notEqual(result.compatibility.status, "blocked");
+  assert.equal(
+    result.diagnostics.some((item) => item.code === "V2_ROI_SHAPE_CONFLICT"),
+    false,
+  );
+});
+
 test("blocks malformed, inconsistent, and out-of-range V2 ROI data", () => {
   const conflicting = clsProject();
   Object.assign(conflicting.project as Record<string, unknown>, {
@@ -914,6 +984,26 @@ test("blocks malformed, inconsistent, and out-of-range V2 ROI data", () => {
   assert.equal(conflictResult.compatibility.status, "blocked");
   assert.ok(
     conflictResult.diagnostics.some((item) => item.code === "V2_ROI_SHAPE_CONFLICT"),
+  );
+
+  const subtlyConflicting = clsProject();
+  Object.assign(subtlyConflicting.project as Record<string, unknown>, {
+    roiMode: "simple",
+    roiPosX: 0.1,
+    roiPosY: 0.2,
+    roiWidth: 0.8,
+    roiHeight: 0.9,
+    roiShape: serializedRectangleRoiShape(0.100002, 0.2, 0.8, 0.9),
+  });
+  const subtleConflictResult = parseV2SubvisionProject({
+    jsonText: JSON.stringify(subtlyConflicting),
+  });
+  assert.equal(subtleConflictResult.ok, true);
+  assert.equal(subtleConflictResult.compatibility.status, "blocked");
+  assert.ok(
+    subtleConflictResult.diagnostics.some(
+      (item) => item.code === "V2_ROI_SHAPE_CONFLICT",
+    ),
   );
 
   const invalidBitmap = clsProject();

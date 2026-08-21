@@ -46,9 +46,16 @@ import {
   matchImageFiles,
   mergeArchiveImageEntries,
   mergePickedDirectoryFiles,
+  selectedSourceUsage,
   type ImageMatchReport,
   type SelectedSourceFile,
 } from "../lib/files/imageMatcher.ts";
+import {
+  assertSourceSelectionUsage,
+  DEFAULT_SOURCE_SELECTION_MAX_FILES,
+  DEFAULT_SOURCE_SELECTION_MAX_OPEN_ARCHIVES,
+  DEFAULT_SOURCE_SELECTION_MAX_TOTAL_BYTES,
+} from "../lib/files/sourceSelectionLimits.ts";
 import {
   projectHasEmbeddedImages,
   projectImagePaths,
@@ -64,9 +71,8 @@ import type {
   ProjectIR,
   ProjectSourceFormat,
 } from "../lib/model/project.ts";
+import { APP_VERSION } from "../lib/release.ts";
 import {
-  writeSvpaArchive,
-  writeVisionArchive,
   type AppLanguage,
   type ContainerProgress,
 } from "../lib/output/containers.ts";
@@ -74,31 +80,23 @@ import {
   isBlobFallbackSafe,
   requestSaveDestination,
   SaveCancelledError,
-  saveText,
   type SaveDestination,
   type SaveFileType,
   type SaveResult,
 } from "../lib/output/save.ts";
-import { EXPECTED_HELPER_SIZE } from "../lib/security/helperIntegrity.ts";
-import { PROJECT_TEXT_MAX_BYTES } from "../lib/security/resourceLimits.ts";
-import { writeSrproj } from "../lib/output/srproj.ts";
 import {
-  writeV2SubvisionProject,
-  writeV2VisionProject,
-} from "../lib/output/v2.ts";
+  commitPreparedConversionOutput,
+  prepareConversionOutput,
+  WriterDiagnosticsError,
+  type PreparedConversionOutput,
+} from "../lib/output/conversionSave.ts";
+import { safeOutputStem } from "../lib/output/fileNames.ts";
 
 const localeByLanguage: Record<ConverterLanguage, AppLanguage> = {
   zh: "zh-CN",
   en: "en-US",
   ko: "ko-KR",
 };
-
-// Reserve enough room for the generated srproj, manifest, instructions,
-// helper, central directory, and other ZIP metadata. Small SVPA packages use
-// the browser download path so an asynchronous preflight failure cannot leave
-// a 0-byte file created by the system save picker.
-const SVPA_BLOB_DOWNLOAD_RESERVE_BYTES =
-  EXPECTED_HELPER_SIZE + PROJECT_TEXT_MAX_BYTES * 3 + 8 * 1024 ** 2;
 
 const uiCopy = {
   zh: {
@@ -109,7 +107,7 @@ const uiCopy = {
     multiple: "一次只能转换一个项目文件。",
     blocked: "该项目包含目标版本无法安全表示的内容，因此没有生成文件。",
     invalid: "项目文件已损坏或内容不完整，无法安全读取。",
-    unsupported: "v0.0.1 仅支持 Classification 和多边形 Segmentation；该项目类型留待后续版本。",
+    unsupported: `v${APP_VERSION} 仅支持 Classification 和多边形 Segmentation；该项目类型留待后续版本。`,
     emptyProject: "项目中没有图片，当前没有可安全生成的目标格式。",
     detection: "检测 (Detection)",
     segmentation: "分割 (Segmentation)",
@@ -123,6 +121,9 @@ const uiCopy = {
     directorySizeLimit: `所选目录候选图片总大小超过 ${formatLimitBytes(DEFAULT_DIRECTORY_MAX_TOTAL_BYTES)}。`,
     imageFilesNeedPaths: "该项目含有同名图片，直接多选文件会丢失所属目录，无法安全匹配。请改用图片 ZIP，或在桌面版 Edge/Chrome 中选择目录。",
     imageZipEmpty: "所选 ZIP 中没有找到受支持的图片。请保留原图片目录结构后重新压缩。",
+    sourceFileLimit: `累计选择的图片来源超过 ${DEFAULT_SOURCE_SELECTION_MAX_FILES.toLocaleString("zh-CN")} 个文件上限。请清空后选择更精确的目录或 ZIP。`,
+    sourceSizeLimit: `累计选择的图片来源超过 ${formatLimitBytes(DEFAULT_SOURCE_SELECTION_MAX_TOTAL_BYTES)} 上限。请清空后缩小选择范围。`,
+    sourceArchiveLimit: `累计打开的图片 ZIP 超过 ${DEFAULT_SOURCE_SELECTION_MAX_OPEN_ARCHIVES} 个上限。请清空后合并 ZIP 再选择。`,
     unmappedSourceField: "这个 V1 设置没有经过验证的 V2 对应字段，转换时不会写入目标项目。",
     diagnosticTimestampLoss: "目标格式不会保留源项目中的部分时间戳或内部标识字段。",
     diagnosticSplitLoss: "目标格式会规范化数据划分，部分划分名称、标识或多重归属无法保留。",
@@ -160,7 +161,7 @@ const uiCopy = {
     multiple: "Choose exactly one project file at a time.",
     blocked: "The project contains data that cannot be represented safely in the target version.",
     invalid: "The project file is damaged or incomplete and could not be read safely.",
-    unsupported: "v0.0.1 supports only Classification and polygon Segmentation; this project type is planned for a later release.",
+    unsupported: `v${APP_VERSION} supports only Classification and polygon Segmentation; this project type is planned for a later release.`,
     emptyProject: "The project contains no images, so no target format can be created safely.",
     detection: "Detection",
     segmentation: "Segmentation",
@@ -174,6 +175,9 @@ const uiCopy = {
     directorySizeLimit: `The candidate images in the selected folder exceed ${formatLimitBytes(DEFAULT_DIRECTORY_MAX_TOTAL_BYTES)}.`,
     imageFilesNeedPaths: "This project contains duplicate image filenames. Direct file selection loses their folders and cannot be matched safely. Choose an image ZIP, or select the folder in desktop Edge/Chrome.",
     imageZipEmpty: "No supported images were found in the selected ZIP. Preserve the original image folder structure and create the ZIP again.",
+    sourceFileLimit: `Selected image sources exceed the cumulative ${DEFAULT_SOURCE_SELECTION_MAX_FILES.toLocaleString("en-US")}-file limit. Clear them and choose a more precise folder or ZIP.`,
+    sourceSizeLimit: `Selected image sources exceed the cumulative ${formatLimitBytes(DEFAULT_SOURCE_SELECTION_MAX_TOTAL_BYTES)} limit. Clear them and narrow the selection.`,
+    sourceArchiveLimit: `More than ${DEFAULT_SOURCE_SELECTION_MAX_OPEN_ARCHIVES} image ZIPs are open. Clear them and combine the ZIPs before selecting again.`,
     unmappedSourceField: "This V1 setting has no verified V2 equivalent and will not be written to the target project.",
     diagnosticTimestampLoss: "The target format does not preserve some source timestamps or internal identifiers.",
     diagnosticSplitLoss: "The target format normalizes dataset splits, so some split names, identifiers, or multiple memberships cannot be preserved.",
@@ -211,7 +215,7 @@ const uiCopy = {
     multiple: "프로젝트 파일을 한 번에 하나만 선택하세요.",
     blocked: "대상 버전에서 안전하게 표현할 수 없는 데이터가 포함되어 있습니다.",
     invalid: "프로젝트 파일이 손상되었거나 불완전하여 안전하게 읽을 수 없습니다.",
-    unsupported: "v0.0.1은 Classification 및 다각형 Segmentation만 지원합니다. 이 프로젝트 유형은 이후 버전에서 지원할 예정입니다.",
+    unsupported: `v${APP_VERSION}은 Classification 및 다각형 Segmentation만 지원합니다. 이 프로젝트 유형은 이후 버전에서 지원할 예정입니다.`,
     emptyProject: "프로젝트에 이미지가 없어 안전하게 만들 수 있는 대상 형식이 없습니다.",
     detection: "검출 (Detection)",
     segmentation: "분할 (Segmentation)",
@@ -225,6 +229,9 @@ const uiCopy = {
     directorySizeLimit: `선택한 폴더의 후보 이미지 총크기가 ${formatLimitBytes(DEFAULT_DIRECTORY_MAX_TOTAL_BYTES)}를 초과합니다.`,
     imageFilesNeedPaths: "이 프로젝트에는 이름이 같은 이미지가 있습니다. 파일 직접 선택은 폴더 정보를 잃어 안전하게 일치시킬 수 없습니다. 이미지 ZIP을 선택하거나 데스크톱 Edge/Chrome에서 폴더를 선택하세요.",
     imageZipEmpty: "선택한 ZIP에서 지원되는 이미지를 찾지 못했습니다. 원본 이미지 폴더 구조를 유지하여 다시 압축하세요.",
+    sourceFileLimit: `선택한 이미지 소스가 누적 ${DEFAULT_SOURCE_SELECTION_MAX_FILES.toLocaleString("ko-KR")}개 파일 제한을 초과합니다. 지운 후 더 정확한 폴더 또는 ZIP을 선택하세요.`,
+    sourceSizeLimit: `선택한 이미지 소스가 누적 ${formatLimitBytes(DEFAULT_SOURCE_SELECTION_MAX_TOTAL_BYTES)} 제한을 초과합니다. 지운 후 선택 범위를 줄이세요.`,
+    sourceArchiveLimit: `열린 이미지 ZIP이 누적 ${DEFAULT_SOURCE_SELECTION_MAX_OPEN_ARCHIVES}개 제한을 초과합니다. 지운 후 ZIP을 합쳐 다시 선택하세요.`,
     unmappedSourceField: "이 V1 설정에는 검증된 V2 대응 필드가 없어 대상 프로젝트에 기록되지 않습니다.",
     diagnosticTimestampLoss: "대상 형식은 원본 프로젝트의 일부 타임스탬프 또는 내부 식별자를 보존하지 않습니다.",
     diagnosticSplitLoss: "대상 형식에서 데이터 분할을 정규화하므로 일부 분할 이름, 식별자 또는 다중 소속을 보존할 수 없습니다.",
@@ -262,10 +269,15 @@ interface RuntimeDiagnostic {
   readonly severity: ConverterDiagnostic["severity"];
   readonly code: string;
   readonly path?: string;
+  readonly pathTitle?: string;
   readonly message?: string;
   readonly params?: Readonly<Record<string, string | number>>;
   readonly fallbackCode?: string;
   readonly sticky?: boolean;
+  /** Prevent saving until the source, target, or project state changes. */
+  readonly blocking?: boolean;
+  /** The same operation can reasonably be attempted again without edits. */
+  readonly retryable?: boolean;
 }
 
 type OperationKind = "loading-project" | "reading-directory" | "reading-image-zip" | "saving";
@@ -273,6 +285,13 @@ type OperationKind = "loading-project" | "reading-directory" | "reading-image-zi
 interface ActiveOperation {
   readonly kind: OperationKind;
   readonly controller: AbortController;
+}
+
+interface PreparedSaveContext {
+  readonly generation: number;
+  readonly target: ConverterOutputFormat;
+  readonly language: ConverterLanguage;
+  readonly output: PreparedConversionOutput;
 }
 
 export function ProjectConverter() {
@@ -288,13 +307,17 @@ export function ProjectConverter() {
   const [saveResult, setSaveResult] = useState<SaveResult | null>(null);
   const [directoryCount, setDirectoryCount] = useState(0);
   const [directoryMatching, setDirectoryMatching] = useState(false);
+  const [savePrepared, setSavePrepared] = useState(false);
   const fallbackDirectoryInput = useRef<HTMLInputElement>(null);
   const imageFilesInput = useRef<HTMLInputElement>(null);
   const imageZipInput = useRef<HTMLInputElement>(null);
   const loadedRef = useRef<LoadedProject | null>(null);
+  const selectedFilesRef = useRef<readonly SelectedSourceFile[]>([]);
   const selectedImageArchivesRef = useRef<Map<string, OpenArchive>>(new Map());
   const imageZipSequenceRef = useRef(0);
   const saveInFlightRef = useRef(false);
+  const finalizingSaveRef = useRef(false);
+  const preparedSaveRef = useRef<PreparedSaveContext | null>(null);
   const mountedRef = useRef(false);
   const generationRef = useRef(0);
   const directoryMatchingRef = useRef(false);
@@ -314,6 +337,7 @@ export function ProjectConverter() {
 
   const beginOperation = useCallback((kind: OperationKind): ActiveOperation => {
     activeOperationRef.current?.controller.abort();
+    finalizingSaveRef.current = false;
     const operation = { kind, controller: new AbortController() };
     activeOperationRef.current = operation;
     return operation;
@@ -325,6 +349,20 @@ export function ProjectConverter() {
     }
   }, []);
 
+  const discardPreparedSave = useCallback(() => {
+    preparedSaveRef.current = null;
+    setSavePrepared(false);
+  }, []);
+
+  const commitSelectedFiles = useCallback(
+    (next: readonly SelectedSourceFile[], openArchiveCount: number) => {
+      assertSourceSelectionUsage(selectedSourceUsage(next, openArchiveCount));
+      selectedFilesRef.current = next;
+      setSelectedFiles(next);
+    },
+    [],
+  );
+
   const invalidateActiveOperation = useCallback(() => {
     const operation = activeOperationRef.current;
     activeOperationRef.current = null;
@@ -332,6 +370,7 @@ export function ProjectConverter() {
   }, []);
 
   const cancelOperation = useCallback(() => {
+    if (finalizingSaveRef.current) return;
     activeOperationRef.current?.controller.abort();
   }, []);
 
@@ -347,6 +386,7 @@ export function ProjectConverter() {
       fallbackDirectoryContextRef.current = null;
       imageFilesContextRef.current = null;
       imageZipContextRef.current = null;
+      preparedSaveRef.current = null;
       const imageArchives = selectedImageArchivesRef.current;
       selectedImageArchivesRef.current = new Map();
       void closeOpenArchives(imageArchives.values());
@@ -409,14 +449,22 @@ export function ProjectConverter() {
   );
   const relativeSubvisionPath = projectHasRelativePaths && target === "subvisionproj";
   const compatibilityBlocked = Boolean(
-    loaded?.parseResult.compatibility.status === "blocked" &&
-      isCrossVersion(loaded.format, target),
+    loaded &&
+      isCrossVersion(loaded.format, target) &&
+      loaded.parseResult.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.severity === "error" &&
+          targetIncludesDiagnostic(diagnostic, target),
+      ),
   );
   const projectUnsupported = Boolean(
     status === "unsupported" ||
       (project && (outputFormats.length === 0 || project.files.length === 0)),
   );
   const imagesReady = !needsImageAccess || embeddedImages || Boolean(matchReport?.canPackage);
+  const hasBlockingRuntimeDiagnostic = runtimeDiagnostics.some(
+    (diagnostic) => diagnostic.blocking,
+  );
   const canSave = Boolean(
     project &&
       target &&
@@ -425,12 +473,14 @@ export function ProjectConverter() {
       project.files.length > 0 &&
       imagesReady &&
       !relativeSubvisionPath &&
+      !hasBlockingRuntimeDiagnostic &&
       (!needsConfirmation || confirmationChecked) &&
       !directoryMatching &&
       status !== "inspecting" && status !== "saving",
   );
 
   const setLanguage = useCallback((next: ConverterLanguage) => {
+    if (preparedSaveRef.current || saveInFlightRef.current) return;
     setLanguageState(next);
     try {
       window.localStorage.setItem("saige-converter-language", next);
@@ -446,6 +496,7 @@ export function ProjectConverter() {
     fallbackDirectoryContextRef.current = null;
     imageFilesContextRef.current = null;
     imageZipContextRef.current = null;
+    preparedSaveRef.current = null;
     const imageArchives = selectedImageArchivesRef.current;
     selectedImageArchivesRef.current = new Map();
     void closeOpenArchives(imageArchives.values());
@@ -455,6 +506,7 @@ export function ProjectConverter() {
     setLoaded(null);
     setPendingSource(null);
     setTarget(null);
+    selectedFilesRef.current = [];
     setSelectedFiles([]);
     setDirectoryCount(0);
     setConfirmationChecked(false);
@@ -462,6 +514,7 @@ export function ProjectConverter() {
     setSaveResult(null);
     setProgress(null);
     setDirectoryMatching(false);
+    setSavePrepared(false);
     setStatus("idle");
   }, [invalidateActiveOperation]);
 
@@ -488,6 +541,7 @@ export function ProjectConverter() {
       fallbackDirectoryContextRef.current = null;
       imageFilesContextRef.current = null;
       imageZipContextRef.current = null;
+      preparedSaveRef.current = null;
       const imageArchives = selectedImageArchivesRef.current;
       selectedImageArchivesRef.current = new Map();
       const previous = loadedRef.current;
@@ -499,6 +553,7 @@ export function ProjectConverter() {
         fileSize: sourceFile.size,
       });
       setTarget(null);
+      selectedFilesRef.current = [];
       setSelectedFiles([]);
       setDirectoryCount(0);
       setDirectoryMatching(false);
@@ -506,6 +561,7 @@ export function ProjectConverter() {
       setRuntimeDiagnostics([]);
       setSaveResult(null);
       setProgress({ stage: "inspecting" });
+      setSavePrepared(false);
       setStatus("inspecting");
 
       try {
@@ -642,7 +698,10 @@ export function ProjectConverter() {
         ));
         return;
       }
-      setSelectedFiles((current) => mergePickedDirectoryFiles(current, picked));
+      commitSelectedFiles(
+        mergePickedDirectoryFiles(selectedFilesRef.current, picked),
+        selectedImageArchivesRef.current.size,
+      );
       setDirectoryCount((count) => count + 1);
       setRuntimeDiagnostics(clearImageSourceDiagnostics);
     } catch (error) {
@@ -674,7 +733,7 @@ export function ProjectConverter() {
       }
       finishOperation(operation);
     }
-  }, [beginOperation, finishOperation, language, project, projectUnsupported]);
+  }, [beginOperation, commitSelectedFiles, finishOperation, language, project, projectUnsupported]);
 
   const handleFallbackDirectory = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const context = fallbackDirectoryContextRef.current;
@@ -702,7 +761,10 @@ export function ProjectConverter() {
             },
           ));
         } else {
-          setSelectedFiles((current) => mergePickedDirectoryFiles(current, picked));
+          commitSelectedFiles(
+            mergePickedDirectoryFiles(selectedFilesRef.current, picked),
+            selectedImageArchivesRef.current.size,
+          );
           setDirectoryCount((count) => count + 1);
           setRuntimeDiagnostics(clearImageSourceDiagnostics);
         }
@@ -714,7 +776,7 @@ export function ProjectConverter() {
       }
     }
     event.currentTarget.value = "";
-  }, [language]);
+  }, [commitSelectedFiles, language]);
 
   const chooseImageFiles = useCallback(() => {
     const currentLoaded = loadedRef.current;
@@ -762,7 +824,10 @@ export function ProjectConverter() {
         ));
         return;
       }
-      setSelectedFiles((current) => mergePickedDirectoryFiles(current, picked));
+      commitSelectedFiles(
+        mergePickedDirectoryFiles(selectedFilesRef.current, picked),
+        selectedImageArchivesRef.current.size,
+      );
       setRuntimeDiagnostics(clearImageSourceDiagnostics);
     } catch (error) {
       setRuntimeDiagnostics((current) => replaceImageSourceDiagnostic(
@@ -770,7 +835,7 @@ export function ProjectConverter() {
         directoryDiagnosticFromError(error, "DIRECTORY_UNSUPPORTED"),
       ));
     }
-  }, [language]);
+  }, [commitSelectedFiles, language]);
 
   const chooseImageZip = useCallback(() => {
     const currentLoaded = loadedRef.current;
@@ -840,13 +905,16 @@ export function ProjectConverter() {
         ));
         return;
       }
-      selectedImageArchivesRef.current.set(selectionId, archive);
-      setSelectedFiles((current) => mergeArchiveImageEntries(
-        current,
-        archive as OpenArchive,
+      const retainedArchive = archive;
+      const nextFiles = mergeArchiveImageEntries(
+        selectedFilesRef.current,
+        retainedArchive,
         imageEntries,
         selectionId,
-      ));
+      );
+      commitSelectedFiles(nextFiles, selectedImageArchivesRef.current.size + 1);
+      selectedImageArchivesRef.current.set(selectionId, retainedArchive);
+      archive = undefined;
       setRuntimeDiagnostics(clearImageSourceDiagnostics);
     } catch (error) {
       await archive?.close().catch(() => undefined);
@@ -864,7 +932,7 @@ export function ProjectConverter() {
       }
       finishOperation(operation);
     }
-  }, [beginOperation, finishOperation, language]);
+  }, [beginOperation, commitSelectedFiles, finishOperation, language]);
 
   const clearImageSources = useCallback(() => {
     invalidateActiveOperation();
@@ -878,6 +946,7 @@ export function ProjectConverter() {
     if (fallbackDirectoryInput.current) fallbackDirectoryInput.current.value = "";
     if (imageFilesInput.current) imageFilesInput.current.value = "";
     if (imageZipInput.current) imageZipInput.current.value = "";
+    selectedFilesRef.current = [];
     setSelectedFiles([]);
     setDirectoryCount(0);
     setDirectoryMatching(false);
@@ -898,88 +967,63 @@ export function ProjectConverter() {
     saveInFlightRef.current = true;
     const operation = beginOperation("saving");
     const { signal } = operation.controller;
+    let operationLanguage = language;
     setSaveResult(null);
     try {
       const generation = generationRef.current;
       const currentLoaded = loaded;
+      const cached = preparedSaveRef.current;
+      const preparedContext =
+        cached &&
+        cached.generation === generation &&
+        cached.target === target
+          ? cached
+          : null;
+      operationLanguage = preparedContext?.language ?? language;
       const isCurrent = () =>
         mountedRef.current &&
         generationRef.current === generation &&
         loadedRef.current === currentLoaded &&
         activeOperationRef.current === operation;
       const updateProgress = (next: ConverterProgress) => {
-        if (isCurrent()) setProgress(next);
+        if (isCurrent()) {
+          if (next.stage === "finalizing") finalizingSaveRef.current = true;
+          setProgress(next);
+        }
       };
       const originalProject = loaded.project;
       const fileName = outputFileName(originalProject, target);
-      const preparedResolution = needsImageAccess
-        ? resolveProjectImages(
-            originalProject,
-            loaded.archive,
-            matchReport ?? undefined,
-          )
-        : undefined;
-      const preferDownload = Boolean(
-        target === "svpa-zip" &&
-          preparedResolution?.complete &&
-          isBlobFallbackSafe(
-            preparedResolution.totalBytes + SVPA_BLOB_DOWNLOAD_RESERVE_BYTES,
-          ),
-      );
-      let destination: SaveDestination;
-      try {
-        updateProgress({
-          stage: preferDownload ? "converting" : "choosing-save-location",
-        });
-        destination = await waitForAbortable(
-          requestSaveDestination(fileName, saveType(target, language), {
-            preferDownload,
-          }),
-          signal,
-        );
-      } catch (error) {
-        if (!isCurrent()) return;
-        setProgress(null);
-        if (signal.aborted || error instanceof SaveCancelledError || isAbortError(error)) {
-          setStatus("ready");
-          return;
-        }
-        if (isPermissionFallbackError(error)) {
-          destination = { fileName };
-          setRuntimeDiagnostics((current) => [
-            ...current.filter((item) => item.code !== "SAVE_PICKER_DOWNLOAD_FALLBACK"),
-            {
-              severity: "info",
-              code: "SAVE_PICKER_DOWNLOAD_FALLBACK",
-              sticky: true,
-            },
-          ]);
-        } else {
-          setRuntimeDiagnostics((current) => [
-            ...current,
-            saveDiagnosticFromError(error),
-          ]);
-          setStatus("error");
-          return;
-        }
-      }
-
-      if (!isCurrent()) return;
-      throwIfOperationAborted(signal);
       setStatus("saving");
       setRuntimeDiagnostics((current) => current.filter((item) => item.sticky));
-      updateProgress({ stage: "converting" });
-      try {
+      let prepared = preparedContext?.output;
+      let destination: SaveDestination;
+
+      if (prepared) {
+        // This is the second, user-activated phase for a large streaming
+        // output. All deterministic conversion and helper checks completed on
+        // the first click, before the system picker can create a placeholder.
+        updateProgress({ stage: "choosing-save-location" });
+        destination = await waitForAbortable(
+          requestSaveDestination(
+            prepared.fileName,
+            saveType(target, operationLanguage),
+          ),
+          signal,
+        );
+        if (!isCurrent()) return;
+      } else {
+        updateProgress({ stage: "converting" });
         let workingProject = originalProject;
-        let resolved: ResolvedImageSet | undefined = preparedResolution;
+        const resolved: ResolvedImageSet | undefined = needsImageAccess
+          ? resolveProjectImages(
+              originalProject,
+              loaded.archive,
+              matchReport ?? undefined,
+            )
+          : undefined;
         if (needsImageAccess) {
-          resolved ??= resolveProjectImages(
-            originalProject,
-            loaded.archive,
-            matchReport ?? undefined,
-          );
-          if (!resolved.complete) {
-            throw new Error(uiCopy[language].selectImages);
+          if (!resolved?.complete) {
+            throw new Error(uiCopy[operationLanguage].selectImages);
           }
         }
 
@@ -987,7 +1031,7 @@ export function ProjectConverter() {
         // Lightweight V2 output performs the same check only when it needed
         // source images to recover missing dimensions.
         if (requiresImages || requiresDimensions) {
-          if (!resolved) throw new Error(uiCopy[language].selectImages);
+          if (!resolved) throw new Error(uiCopy[operationLanguage].selectImages);
           const { verifyAndEnrichProjectImages } = await import("../lib/files/imageDimensions.ts");
           if (!isCurrent()) return;
           const enriched = await verifyAndEnrichProjectImages(
@@ -1000,7 +1044,7 @@ export function ProjectConverter() {
                 current: completed,
                 total,
                 unit: "items",
-                label: uiCopy[language].dimensions,
+                label: uiCopy[operationLanguage].dimensions,
               }),
             },
           );
@@ -1010,99 +1054,101 @@ export function ProjectConverter() {
               severity: "error",
               code: issue.code,
               path: shortPath(issue.path),
+              pathTitle: issue.path,
               message: issue.message,
+              blocking: true,
+              retryable: false,
             })));
-            throw new Error(uiCopy[language].imageFailure);
+            throw new Error(uiCopy[operationLanguage].imageFailure);
           }
           workingProject = enriched.project;
         }
 
-        let completedSave: SaveResult;
-        if (target === "subvisionproj") {
-          const result = writeV2SubvisionProject(workingProject, {
-            externalPaths: externalPathsForProject(originalProject),
-            allowConfirmedLoss: confirmationChecked || !needsConfirmation,
-          });
-          if (!result.ok) throw new WriterDiagnosticsError(result.diagnostics);
-          updateProgress({ stage: "finalizing" });
-          completedSave = await saveText(
-            destination,
-            result.jsonText,
-            "application/json;charset=utf-8",
-            signal,
-          );
-        } else if (target === "visionproj") {
-          const result = writeV2VisionProject(workingProject, {
-            allowConfirmedLoss: confirmationChecked || !needsConfirmation,
-          });
-          if (!result.ok) throw new WriterDiagnosticsError(result.diagnostics);
-          if (!resolved) throw new Error(uiCopy[language].selectImages);
-          completedSave = await writeVisionArchive({
-            destination,
-            built: result,
-            images: resolved.images,
-            onProgress: (value) => updateProgress(containerProgress(value)),
-            signal,
-          });
-        } else if (target === "srproj") {
-          updateProgress({ stage: "finalizing" });
-          completedSave = await saveText(
-            destination,
-            writeSrproj(workingProject, {
-              pathForFile: (file) => unquotePath(file.sourcePath),
-              allowConfirmedLoss: confirmationChecked || !needsConfirmation,
-            }),
-            "application/xml;charset=utf-8",
-            signal,
-          );
-        } else {
-          if (!resolved) throw new Error(uiCopy[language].selectImages);
-          const pathForFile = (file: ProjectIR["files"][number]) => file.sourcePath;
-          const srprojXml =
-            loaded.format === "v1-srproj" && loaded.projectXmlText
-              ? loaded.projectXmlText
-              : writeSrproj(workingProject, {
-                  pathForFile,
-                  allowConfirmedLoss: confirmationChecked || !needsConfirmation,
-                });
-          completedSave = await writeSvpaArchive({
-            destination,
-            project: workingProject,
-            srprojXml,
-            images: resolved.images,
-            language: localeByLanguage[language],
-            originalProjectDirectory: loaded.svpaManifest?.OriginalProjectDirectory ?? "",
-            onProgress: (value) => updateProgress(containerProgress(value)),
-            signal,
-          });
-        }
+        prepared = await prepareConversionOutput({
+          target,
+          fileName,
+          originalProject,
+          workingProject,
+          images: resolved?.images,
+          sourceFormat: loaded.format,
+          sourceProjectXmlText: loaded.projectXmlText,
+          originalProjectDirectory:
+            loaded.svpaManifest?.OriginalProjectDirectory ?? "",
+          language: localeByLanguage[operationLanguage],
+          allowConfirmedLoss: confirmationChecked || !needsConfirmation,
+          signal,
+        });
         if (!isCurrent()) return;
-        setProgress(null);
-        setSaveResult(completedSave);
-        setStatus("success");
-      } catch (error) {
-        if (!isCurrent()) return;
-        setProgress(null);
-        if (signal.aborted || isAbortError(error)) {
+        if (!isBlobFallbackSafe(prepared.estimatedBytes)) {
+          preparedSaveRef.current = {
+            generation,
+            target,
+            language: operationLanguage,
+            output: prepared,
+          };
+          setSavePrepared(true);
+          setProgress(null);
           setStatus("ready");
           return;
         }
-        if (error instanceof WriterDiagnosticsError) {
-          setRuntimeDiagnostics(
-            error.diagnostics.map((item) => ({
-              ...toUiDiagnostic(item, language),
-              code: item.code,
-            })),
-          );
-        } else {
-          setRuntimeDiagnostics((current) => [
-            ...current,
-            saveDiagnosticFromError(error),
-          ]);
-        }
-        setStatus("error");
+        // Small and medium outputs are completely prepared before the browser
+        // download starts, so no system-picker placeholder can be left behind.
+        destination = { fileName: prepared.fileName };
       }
+
+      throwIfOperationAborted(signal);
+      updateProgress({ stage: "converting" });
+      const completedSave = await commitPreparedConversionOutput(
+        prepared,
+        destination,
+        {
+          signal,
+          onProgress: (value) => updateProgress(containerProgress(value)),
+        },
+      );
+      if (!isCurrent()) return;
+      if (!Number.isSafeInteger(completedSave.size) || completedSave.size <= 0) {
+        throw Object.assign(new Error("The generated project file is empty."), {
+          code: "EMPTY_SAVE_RESULT",
+        });
+      }
+      preparedSaveRef.current = null;
+      setSavePrepared(false);
+      setProgress(null);
+      setSaveResult(completedSave);
+      setStatus("success");
+    } catch (error) {
+      const isCurrent =
+        mountedRef.current && activeOperationRef.current === operation;
+      if (!isCurrent) return;
+      setProgress(null);
+      if (
+        signal.aborted ||
+        error instanceof SaveCancelledError ||
+        isAbortError(error)
+      ) {
+        setStatus(loadedRef.current?.project ? "ready" : "idle");
+        return;
+      }
+      if (error instanceof WriterDiagnosticsError) {
+        discardPreparedSave();
+        setRuntimeDiagnostics(
+          error.diagnostics.map((item) => ({
+            ...toUiDiagnostic(item, operationLanguage),
+            code: item.code,
+            blocking: true,
+            retryable: false,
+          })),
+        );
+      } else {
+        setRuntimeDiagnostics((current) => [
+          ...current,
+          saveDiagnosticFromError(error),
+        ]);
+      }
+      setStatus("error");
     } finally {
+      finalizingSaveRef.current = false;
       saveInFlightRef.current = false;
       finishOperation(operation);
     }
@@ -1110,6 +1156,7 @@ export function ProjectConverter() {
     beginOperation,
     canSave,
     confirmationChecked,
+    discardPreparedSave,
     finishOperation,
     language,
     loaded,
@@ -1203,11 +1250,13 @@ export function ProjectConverter() {
         } : null}
         progress={progress}
         saveResult={saveResult}
+        preparedForSave={savePrepared}
         canSave={canSave}
         onSelectFile={handleFiles}
         onDrop={handleFiles}
         onTargetChange={(id) => {
           if (projectUnsupported || directoryMatchingRef.current || status === "unsupported") return;
+          discardPreparedSave();
           setTarget(id);
           setConfirmationChecked(false);
           setSaveResult(null);
@@ -1332,7 +1381,11 @@ function buildImageSummary(
   const current = report ?? matchImageFiles(projectImagePaths(project), []);
   const issues: ImageMatchIssue[] = current.matches
     .filter((match) => match.status === "missing" || match.status === "ambiguous")
-    .map((match) => ({ path: shortPath(match.projectPath.originalPath), status: match.status as "missing" | "ambiguous" }));
+    .map((match) => ({
+      path: shortPath(match.projectPath.originalPath),
+      pathTitle: match.projectPath.originalPath,
+      status: match.status as "missing" | "ambiguous",
+    }));
   return {
     state: matching ? "matching" : current.canPackage ? "ready" : selectedSourceCount > 0 ? "incomplete" : "needs-directory",
     purpose,
@@ -1363,35 +1416,14 @@ function projectTypeLabel(
   }
 }
 
-function externalPathsForProject(project: ProjectIR): Readonly<Record<number, string>> {
-  return Object.fromEntries(project.files.map((file) => [file.index, unquotePath(file.sourcePath)]));
-}
-
-function unquotePath(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length < 2) return trimmed;
-  const first = trimmed[0];
-  const last = trimmed.at(-1);
-  return (first === '"' && last === '"') || (first === "'" && last === "'")
-    ? trimmed.slice(1, -1).trim()
-    : trimmed;
-}
-
 function outputFileName(project: ProjectIR, target: ConverterOutputFormat): string {
-  const stem = safeStem(project.project.name);
+  const stem = safeOutputStem(project.project.name);
   if (target === "visionproj") return `${stem}.visionproj`;
   if (target === "subvisionproj") return `${stem}.subvisionproj`;
   if (target === "srproj") return `${stem}.srproj`;
   const now = new Date();
   const stamp = [now.getFullYear(), pad(now.getMonth() + 1), pad(now.getDate())].join("") + "_" + [pad(now.getHours()), pad(now.getMinutes())].join("");
   return `${stem}_SVPA_${stamp}.zip`;
-}
-
-function safeStem(value: string): string {
-  return Array.from(value.normalize("NFC"), (character) => {
-    const code = character.codePointAt(0) ?? 0;
-    return code <= 0x1f || '<>:"/\\|?*'.includes(character) ? "_" : character;
-  }).join("").replace(/[ .]+$/u, "").trim() || "SaigeVision_Project";
 }
 
 function pad(value: number): string { return String(value).padStart(2, "0"); }
@@ -1434,6 +1466,7 @@ function containerProgress(value: ContainerProgress): ConverterProgress {
     unit: "bytes",
     percent: value.percent,
     detail: shortPath(value.currentFile),
+    detailTitle: value.currentFile,
   };
 }
 
@@ -1462,13 +1495,13 @@ function toUiRuntimeDiagnostic(
   const copy = uiCopy[language];
   const localized = runtimeMessageForCode(item.code, copy) ??
     (item.fallbackCode ? runtimeMessageForCode(item.fallbackCode, copy) : undefined);
-  const message = language === "en" && item.message
-    ? item.message
-    : localized ?? copy.saveFailed;
+  const message = localized ??
+    (language === "en" && item.message ? item.message : copy.saveFailed);
   return {
     severity: item.severity,
     code: item.code,
     path: item.path,
+    pathTitle: item.pathTitle,
     message,
   };
 }
@@ -1491,6 +1524,10 @@ function runtimeMessageForCode(
     case "DIRECTORY_SIZE_LIMIT": return copy.directorySizeLimit;
     case "IMAGE_FILES_NEED_RELATIVE_PATHS": return copy.imageFilesNeedPaths;
     case "IMAGE_ZIP_EMPTY": return copy.imageZipEmpty;
+    case "IMAGE_SOURCE_FILE_LIMIT": return copy.sourceFileLimit;
+    case "IMAGE_SOURCE_SIZE_LIMIT": return copy.sourceSizeLimit;
+    case "IMAGE_SOURCE_ARCHIVE_LIMIT": return copy.sourceArchiveLimit;
+    case "IMAGE_SOURCE_USAGE_INVALID": return copy.imageReadFailed;
     case "IMAGE_DIMENSIONS_MISMATCH": return copy.imageDimensionsMismatch;
     case "IMAGE_FORMAT_UNSUPPORTED": return copy.imageFormatUnsupported;
     case "IMAGE_FORMAT_MISMATCH": return copy.imageFormatMismatch;
@@ -1502,6 +1539,7 @@ function runtimeMessageForCode(
     case "IMAGE_DIMENSIONS_INVALID": return copy.imageReadFailed;
     case "SAVE_PICKER_DOWNLOAD_FALLBACK": return copy.savePickerDownloadFallback;
     case "BLOB_FALLBACK_TOO_LARGE": return copy.blobFallbackTooLarge;
+    case "EMPTY_SAVE_RESULT": return copy.saveFailed;
     case "HELPER_LOAD_FAILED": return copy.helperLoadFailed;
     case "HELPER_INTEGRITY_FAILED": return copy.helperIntegrityFailed;
     case "SAVE_FAILED": return copy.saveFailed;
@@ -1522,6 +1560,7 @@ function toUiDiagnostic(
     severity: item.severity,
     code: item.code,
     path: shortPath(item.path),
+    pathTitle: item.path,
     message: isUnmappedV1
       ? uiCopy[language].unmappedSourceField
       : localizedProjectDiagnosticMessage(item, language),
@@ -1585,7 +1624,15 @@ function replaceImageSourceDiagnostic(
   diagnostics: readonly RuntimeDiagnostic[],
   next: RuntimeDiagnostic,
 ): RuntimeDiagnostic[] {
-  return [...clearImageSourceDiagnostics(diagnostics), next];
+  return [
+    ...clearImageSourceDiagnostics(diagnostics),
+    {
+      ...next,
+      severity: "warning",
+      blocking: false,
+      retryable: true,
+    },
+  ];
 }
 
 function hasDuplicateProjectBasenames(project: ProjectIR): boolean {
@@ -1634,7 +1681,7 @@ function saveDiagnosticFromError(error: unknown): RuntimeDiagnostic {
     error && typeof error === "object" && "code" in error
       ? String((error as { code: unknown }).code)
       : "SAVE_FAILED";
-  return { severity: "error", code };
+  return { severity: "error", code, blocking: false, retryable: true };
 }
 
 function shortPath(value: string): string {
@@ -1705,13 +1752,4 @@ function waitForAbortable<T>(
 
 function formatLimitBytes(bytes: number): string {
   return `${Math.round(bytes / 1024 ** 3)} GiB`;
-}
-
-class WriterDiagnosticsError extends Error {
-  readonly diagnostics: readonly ProjectDiagnostic[];
-  constructor(diagnostics: readonly ProjectDiagnostic[]) {
-    super("The target writer rejected this project.");
-    this.name = "WriterDiagnosticsError";
-    this.diagnostics = diagnostics;
-  }
 }

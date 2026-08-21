@@ -2,12 +2,18 @@ import assert from "node:assert/strict";
 import { File as NodeFile } from "node:buffer";
 import test from "node:test";
 import {
+  DEFAULT_DIRECTORY_MAX_FILES,
+  DEFAULT_DIRECTORY_MAX_TOTAL_BYTES,
   type DirectoryHandleLike,
   DirectoryReadError,
   pickDirectoryFiles,
   readDirectoryFiles,
   readWebkitDirectoryFiles,
 } from "../lib/files/directoryPicker.ts";
+import {
+  DEFAULT_SOURCE_SELECTION_MAX_FILES,
+  DEFAULT_SOURCE_SELECTION_MAX_TOTAL_BYTES,
+} from "../lib/files/sourceSelectionLimits.ts";
 
 function fileHandle(name: string, size = 1) {
   return {
@@ -31,6 +37,14 @@ function directory(
     },
   };
 }
+
+test("directory defaults share the global source-selection limits", () => {
+  assert.equal(DEFAULT_DIRECTORY_MAX_FILES, DEFAULT_SOURCE_SELECTION_MAX_FILES);
+  assert.equal(
+    DEFAULT_DIRECTORY_MAX_TOTAL_BYTES,
+    DEFAULT_SOURCE_SELECTION_MAX_TOTAL_BYTES,
+  );
+});
 
 test("directory reader enforces file count and byte limits", async () => {
   const root = directory("images", [fileHandle("a.png", 2), fileHandle("b.png", 2)]);
