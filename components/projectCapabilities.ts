@@ -28,6 +28,25 @@ const VERIFIED_OUTPUTS: OutputMatrix = {
   "v2-subvisionproj": ["svpa-zip", "srproj"],
 };
 
+// These fields are routine V2 audit/container metadata. V1 has no equivalent,
+// but omitting them does not change images, annotations, ROI, or train/validation
+// membership. Keep them in the parser diagnostics for technical reports without
+// turning them into user actions in the converter UI.
+const NON_ACTIONABLE_V2_TO_V1_DIAGNOSTICS = new Set([
+  "V2_FILE_TIMESTAMP_NOT_IN_V1",
+  "V2_LABEL_TIMESTAMP_NOT_IN_V1",
+  "V2_SPLIT_NAME_NOT_IN_V1",
+  "V2_DATASET_IDENTITY_NOT_IN_V1",
+]);
+
+const NON_ACTIONABLE_V1_TO_V2_NODE_NAMES = new Set([
+  "TrainingParameter",
+  "AugmentationParameter",
+  "SpecificType",
+  "OtherSettings",
+  "MultipageParameter",
+]);
+
 /** Return only conversion paths validated for both the source container and
  * normalized project type. The first item is the UI's recommended default. */
 export function allowedOutputs(
@@ -38,9 +57,18 @@ export function allowedOutputs(
 }
 
 export function targetIncludesDiagnostic(
-  diagnostic: Pick<ProjectDiagnostic, "code">,
+  diagnostic: Pick<ProjectDiagnostic, "code" | "details">,
   target: ProjectOutputFormat | null,
 ): boolean {
+  if (NON_ACTIONABLE_V2_TO_V1_DIAGNOSTICS.has(diagnostic.code)) return false;
+  if (
+    diagnostic.code === "V1_UNMAPPED_XML_NODE" &&
+    NON_ACTIONABLE_V1_TO_V2_NODE_NAMES.has(
+      String(diagnostic.details?.nodeName ?? ""),
+    )
+  ) {
+    return false;
+  }
   return !(target === "svpa-zip" && diagnostic.code === "V2_EXTERNAL_PATH_RELATIVE");
 }
 

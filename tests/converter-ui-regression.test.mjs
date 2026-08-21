@@ -79,7 +79,7 @@ test("cancels every long operation and clears selected image sources safely", as
 });
 
 test("localizes permission fallbacks, save picker descriptions, and raw diagnostics", async () => {
-  const { converter } = await readUiSources();
+  const { converter, shell } = await readUiSources();
 
   assert.equal((converter.match(/directoryPermissionFallback:/g) ?? []).length, 3);
   assert.equal((converter.match(/savePickerDownloadFallback:/g) ?? []).length, 3);
@@ -90,8 +90,9 @@ test("localizes permission fallbacks, save picker descriptions, and raw diagnost
   assert.equal((converter.match(/diagnosticSplitLoss:/g) ?? []).length, 3);
   assert.equal((converter.match(/diagnosticGeometryLoss:/g) ?? []).length, 3);
   assert.equal((converter.match(/diagnosticRoiLoss:/g) ?? []).length, 3);
-  assert.equal((converter.match(/helperUnsigned:/g) ?? []).length, 3);
-  assert.match(converter, /target === "svpa-zip"[\s\S]*?SVPA_HELPER_UNSIGNED/);
+  assert.doesNotMatch(converter, /SVPA_HELPER_UNSIGNED|helperUnsigned:/);
+  assert.doesNotMatch(converter, /trainingSettingsNotMapped|trainingSettingsAdded/);
+  assert.doesNotMatch(shell, /尚未签名|not yet signed|아직 서명/);
   assert.match(converter, /if \(language === "en"\) return item\.message/);
   assert.equal((converter.match(/imageDimensionsMismatch:/g) ?? []).length, 3);
   assert.equal((converter.match(/imageFormatUnsupported:/g) ?? []).length, 3);

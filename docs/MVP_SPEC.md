@@ -196,7 +196,7 @@ V2 数据模型比 V1 更丰富，反向转换不承诺无损。每次转换分�
 
 - 多 dataset、多 split set、`not-split` 或自定义 split 名称。
 - metadata、description、createdBy、assigned/registered 时间和内部 ID。
-- ROI 模式及 V1 无等价的项目级设置。
+- ROI 中尚未验证的 Advanced、Ellipse、Blind、多区域及非默认参数。
 - OCR 文本、旋转框角度/中心数据、复杂 contour、多环/洞、自定义标签类型。
 - V2 独有项目类型及 V1 无对应的 class/project 属性。
 
@@ -205,6 +205,7 @@ MVP 策略：
 - 仅对 golden fixtures 已证明双向等价的项目类型启用 V2→V1。
 - 项目含多个 dataset 或同一图片属于相互冲突的 split 时先阻断，直到有明确规则。
 - metadata、内部 ID、审计时间等非训练语义字段可丢弃，但必须出现在报告中。
+- ROI 仅开放 `none` 与经过真实样本验证的 Simple Rectangle。内部统一使用归一化 LTRB；V1 `Width/Height` 是尺寸，V2 `roiWidth/roiHeight` 实际是右/下边界。任何未知活动 ROI 都是阻断项，确认丢失不能绕过。
 - ROD、OCR、Anomaly、Image Generation 等没有 V1 等价 fixture 的类型默认阻断。
 - 不提供“尽力导出”隐藏开关。
 

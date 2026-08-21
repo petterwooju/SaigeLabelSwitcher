@@ -6,6 +6,7 @@ import type {
   ProjectFileIR,
   ProjectIR,
   ProjectLabelIR,
+  ProjectRoiIR,
   SplitType,
 } from "../model/project.ts";
 import { APP_VERSION, isSupportedProjectType } from "../release.ts";
@@ -152,10 +153,125 @@ export function writeSrproj(
     lines.push("    </Image>");
   }
 
-  lines.push("  </ImageGroup>", "</Project>", "");
+  lines.push("  </ImageGroup>");
+  appendMaskingParameter(lines, project.project.roi, project.project.roiMode);
+  lines.push("</Project>", "");
   const xml = lines.join(lineEnding);
   assertGeneratedXmlResourceLimits(xml);
   return xml;
+}
+
+function appendMaskingParameter(
+  lines: string[],
+  roi: ProjectRoiIR | undefined,
+  legacyRoiMode: string | undefined,
+): void {
+  const legacyMode = normalizeLegacyRoiMode(legacyRoiMode);
+  if (!roi) {
+    if (legacyMode === "simple" || legacyMode === "other") {
+      throw new SrprojWriteError(
+        "SRPROJ_ROI_MAPPING_REQUIRED",
+        "$.project.roi",
+        "An active legacy roiMode requires verified structured ROI geometry before V1 output.",
+      );
+    }
+    if (legacyMode === "none") appendDisabledMaskingParameter(lines);
+    return;
+  }
+
+  const runtimeMode: unknown = (roi as { readonly mode?: unknown }).mode;
+  if (runtimeMode !== "none" && runtimeMode !== "simple") {
+    throw new SrprojWriteError(
+      "SRPROJ_ROI_UNSUPPORTED",
+      "$.project.roi.mode",
+      "Only disabled ROI and a verified Simple Rectangle ROI can be written to V1.",
+    );
+  }
+  if (
+    legacyMode !== undefined &&
+    (legacyMode === "other" || legacyMode !== runtimeMode)
+  ) {
+    throw new SrprojWriteError(
+      "SRPROJ_ROI_MODE_CONFLICT",
+      "$.project.roiMode",
+      "The legacy ROI mode conflicts with the normalized ROI model.",
+    );
+  }
+
+  if (roi.mode === "none") {
+    appendDisabledMaskingParameter(lines);
+    return;
+  }
+
+  if (roi.mode !== "simple" || roi.shape !== "rectangle") {
+    throw new SrprojWriteError(
+      "SRPROJ_ROI_UNSUPPORTED",
+      "$.project.roi",
+      "Only a verified Simple Rectangle ROI can be written to V1.",
+    );
+  }
+
+  const left = normalizedRoiBoundary(roi.left, "$.project.roi.left");
+  const top = normalizedRoiBoundary(roi.top, "$.project.roi.top");
+  const right = normalizedRoiBoundary(roi.right, "$.project.roi.right");
+  const bottom = normalizedRoiBoundary(roi.bottom, "$.project.roi.bottom");
+  if (right <= left || bottom <= top) {
+    throw new SrprojWriteError(
+      "SRPROJ_ROI_BOUNDS_INVALID",
+      "$.project.roi",
+      "ROI boundaries must describe a positive-area rectangle.",
+    );
+  }
+  const width = right - left;
+  const height = bottom - top;
+
+  lines.push(
+    "  <MaskingParameter>",
+    "    <Type>Simple</Type>",
+    `    <RoiRectangle X="${formatRoiNumber(left)}" Y="${formatRoiNumber(top)}" Width="${formatRoiNumber(width)}" Height="${formatRoiNumber(height)}" Shape="Rectangle" />`,
+    "    <RoiSetting>",
+    '      <Intensity Min="0" Max="255" />',
+    '      <Expansion Value="0" />',
+    '      <Inversion Value="False" />',
+    '      <Offset Left="100" Right="100" Top="100" Bottom="100" />',
+    "    </RoiSetting>",
+    "    <BlindGroup>",
+    "      <NumberOfBlinds>0</NumberOfBlinds>",
+    "    </BlindGroup>",
+    "  </MaskingParameter>",
+  );
+}
+
+function normalizeLegacyRoiMode(
+  value: string | undefined,
+): "none" | "simple" | "other" | undefined {
+  const mode = value?.trim().toLocaleLowerCase("en-US");
+  if (!mode) return undefined;
+  if (mode === "no" || mode === "none" || mode === "not set") return "none";
+  return mode === "simple" ? "simple" : "other";
+}
+
+function appendDisabledMaskingParameter(lines: string[]): void {
+  lines.push(
+    "  <MaskingParameter>",
+    "    <Type>Not set</Type>",
+    "  </MaskingParameter>",
+  );
+}
+
+function normalizedRoiBoundary(value: number, path: string): number {
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new SrprojWriteError(
+      "SRPROJ_ROI_BOUNDS_INVALID",
+      path,
+      "ROI boundaries must be finite normalized numbers between 0 and 1.",
+    );
+  }
+  return Object.is(value, -0) ? 0 : value;
+}
+
+function formatRoiNumber(value: number): string {
+  return Object.is(value, -0) ? "0" : String(value);
 }
 
 function assertGeneratedXmlResourceLimits(xml: string): void {

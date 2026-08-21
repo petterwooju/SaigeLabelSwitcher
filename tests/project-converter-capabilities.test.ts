@@ -54,7 +54,7 @@ test("target-specific path rules keep portable SVPA output available", () => {
   assert.equal(targetNeedsConfirmation(relativePath, "srproj"), true);
   assert.equal(targetNeedsConfirmation(relativePath, "svpa-zip"), false);
   const fieldLoss = {
-    code: "V2_TIMESTAMP_NOT_IN_V1",
+    code: "V2_CLASS_DESCRIPTION_NOT_IN_V1",
     disposition: "drop" as const,
   };
   assert.equal(targetConfirmationMode([fieldLoss], "srproj"), "loss");
@@ -70,6 +70,91 @@ test("target-specific path rules keep portable SVPA output available", () => {
     targetNeedsConfirmation([...relativePath, fieldLoss], "svpa-zip"),
     true,
   );
+});
+
+test("routine V2 audit metadata stays in technical diagnostics without prompting users", () => {
+  const routineMetadata = [
+    "V2_FILE_TIMESTAMP_NOT_IN_V1",
+    "V2_LABEL_TIMESTAMP_NOT_IN_V1",
+    "V2_SPLIT_NAME_NOT_IN_V1",
+    "V2_DATASET_IDENTITY_NOT_IN_V1",
+  ].map((code) => ({ code, disposition: "drop" as const }));
+
+  for (const diagnostic of routineMetadata) {
+    assert.equal(targetIncludesDiagnostic(diagnostic, "srproj"), false);
+    assert.equal(targetIncludesDiagnostic(diagnostic, "svpa-zip"), false);
+  }
+  assert.equal(targetConfirmationMode(routineMetadata, "srproj"), "none");
+  assert.equal(targetConfirmationMode(routineMetadata, "svpa-zip"), "none");
+  assert.equal(targetNeedsConfirmation(routineMetadata, "srproj"), false);
+  assert.equal(targetNeedsConfirmation(routineMetadata, "svpa-zip"), false);
+
+  const actionableLoss = {
+    code: "V2_CLASS_DESCRIPTION_NOT_IN_V1",
+    disposition: "drop" as const,
+  };
+  const relativePath = {
+    code: "V2_EXTERNAL_PATH_RELATIVE",
+    disposition: "degrade" as const,
+  };
+  assert.equal(targetIncludesDiagnostic(actionableLoss, "srproj"), true);
+  assert.equal(
+    targetConfirmationMode([...routineMetadata, actionableLoss], "srproj"),
+    "loss",
+  );
+  assert.equal(
+    targetConfirmationMode([...routineMetadata, relativePath], "srproj"),
+    "relative-path",
+  );
+  assert.equal(
+    targetConfirmationMode([...routineMetadata, relativePath], "svpa-zip"),
+    "none",
+  );
+  assert.equal(
+    targetConfirmationMode(
+      [...routineMetadata, relativePath, actionableLoss],
+      "srproj",
+    ),
+    "mixed",
+  );
+  assert.equal(
+    targetConfirmationMode(
+      [...routineMetadata, relativePath, actionableLoss],
+      "svpa-zip",
+    ),
+    "loss",
+  );
+});
+
+test("verified routine V1 settings stay in technical diagnostics without prompting users", () => {
+  const routineNodes = [
+    "TrainingParameter",
+    "AugmentationParameter",
+    "SpecificType",
+    "OtherSettings",
+    "MultipageParameter",
+  ].map((nodeName) => ({
+    code: "V1_UNMAPPED_XML_NODE",
+    disposition: "drop" as const,
+    details: { nodeName },
+  }));
+
+  for (const diagnostic of routineNodes) {
+    assert.equal(targetIncludesDiagnostic(diagnostic, "visionproj"), false);
+    assert.equal(targetIncludesDiagnostic(diagnostic, "subvisionproj"), false);
+  }
+  assert.equal(targetConfirmationMode(routineNodes, "visionproj"), "none");
+  assert.equal(targetConfirmationMode(routineNodes, "subvisionproj"), "none");
+  assert.equal(targetNeedsConfirmation(routineNodes, "visionproj"), false);
+  assert.equal(targetNeedsConfirmation(routineNodes, "subvisionproj"), false);
+
+  const unknownNode = {
+    code: "V1_UNKNOWN_XML_NODE",
+    disposition: "drop" as const,
+    details: { nodeName: "FutureSetting" },
+  };
+  assert.equal(targetIncludesDiagnostic(unknownNode, "visionproj"), true);
+  assert.equal(targetConfirmationMode([unknownNode], "visionproj"), "loss");
 });
 
 test("ProjectConverter uses the capability matrix for loading and rendering", async () => {
@@ -102,5 +187,12 @@ test("ProjectConverter uses the capability matrix for loading and rendering", as
   assert.equal((source.match(/mixedConfirmation:/g) ?? []).length, 3);
   assert.equal((source.match(/mixedConfirmationLabel:/g) ?? []).length, 3);
   assert.match(source, /confirmationMode === "mixed"/);
-  assert.match(source, /allowConfirmedLoss: confirmationChecked \|\| !needsConfirmation/);
+  assert.match(
+    source,
+    /target === "srproj"[\s\S]*?allowConfirmedLoss: confirmationChecked \|\| !needsConfirmation/,
+  );
+  assert.equal(
+    (source.match(/allowConfirmedLoss: confirmationChecked \|\| !needsConfirmation/g) ?? []).length,
+    4,
+  );
 });

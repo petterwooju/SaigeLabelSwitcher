@@ -23,7 +23,9 @@ SaigeVision V1 / V2 项目文件的纯浏览器双向转换 Webapp。项目、�
 - 不支持目录读取的内置浏览器：可选择保留原目录结构的图片 ZIP（包括本工具导出的 SVPA ZIP）。ZIP 图片按需读取，不会整包上传或一次性解压到内存。
 - 直接多选图片文件只适用于文件名全局唯一的项目；存在 `000.png` 等同名图片时会主动阻断，避免把错误图片写入项目。
 
-V1 的训练参数和数据增强参数目前没有经过验证的 V2 对应字段，因此不会写入 V2 项目；图片、类别、标注几何和 Training / Validation 划分不受影响。导入 V2 后请重新确认训练设置。`MaskingParameter = Not set` 会作为“未启用遮罩”处理，不再显示为兼容性警告。
+V1 的训练参数和数据增强参数目前没有经过验证的 V2 对应字段，因此不会写入 V2 项目；图片、类别、标注几何和 Training / Validation 划分不受影响。导入 V2 后请重新确认训练设置。
+
+ROI 当前支持“未启用”和经过真实样本验证的 `Simple + Rectangle`：V1 的归一化 `X/Y/Width/Height` 会转换为 V2 的 `left/top/right/bottom`（V2 原始字段名仍为 `roiPosX/roiPosY/roiWidth/roiHeight`）。Advanced、Ellipse、Blind、非默认 ROI 设置及未知形状会明确阻断，绝不通过确认框静默丢弃。V1→V2 会按目标图像尺寸重建可编辑的矩形 `roiShape`；派生 `roiBitmap` 不伪造，仍需在目标 V2 完成一次打开并重新保存的实机验收。
 
 Segmentation 当前支持 V1 `Contours` 与 V2 `labelContour` 多边形，按环方向保留 `Outer/Inner` 与孔洞；bitmap-only mask、退化/方向不明确的环会明确阻断。Detection、ROD、OCR 等尚未验证类型仍会明确阻断，不会“尽力转换”或静默丢弃标注。
 

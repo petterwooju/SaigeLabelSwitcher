@@ -11,6 +11,7 @@ import type {
   ProjectIR,
   ProjectLabelIR,
   ProjectParseResult,
+  ProjectRoiIR,
   ProjectSplitIR,
   ProjectType,
   SplitType,
@@ -60,6 +61,12 @@ interface ParsedSegmentationLabelGroup {
   readonly raw: JsonObject;
 }
 
+interface ParsedV1MaskingParameter {
+  readonly roi?: ProjectRoiIR;
+  /** Retains an active source mode even when its geometry/settings are blocked. */
+  readonly roiMode: string;
+}
+
 class XmlSyntaxError extends Error {
   readonly code: string;
   readonly offset: number;
@@ -84,12 +91,12 @@ const CORE_ROOT_ELEMENTS = new Set([
   "ModifiedDate",
   "ClassGroup",
   "ImageGroup",
+  "MaskingParameter",
 ]);
 
 // These nodes occur in verified V1 files, but this adapter deliberately does
 // not map their training/runtime settings into the cross-version IR.
 const KNOWN_UNMAPPED_ROOT_ELEMENTS = new Set([
-  "MaskingParameter",
   "TrainingParameter",
   "AugmentationParameter",
   "SpecificType",
@@ -152,6 +159,7 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
 
   reportUnknownAttributes(context, root, "$.Project");
   reportRootNodes(context, root);
+  const masking = parseV1MaskingParameter(context, root);
 
   const version = requiredLeaf(context, root, "Version", "$.Project.Version");
   const rawType = requiredLeaf(context, root, "Type", "$.Project.Type");
@@ -250,7 +258,12 @@ export function parseV1Srproj(input: V1SrprojInput | string): ProjectParseResult
       type,
       rawType,
       description: "",
-      ...(hasNoopMaskingParameter(root) ? { roiMode: "no" } : {}),
+      ...(masking?.roi
+        ? {
+            roi: masking.roi,
+          }
+        : {}),
+      ...(masking ? { roiMode: masking.roiMode } : {}),
       ...(modifiedAt !== undefined ? { modifiedAt } : {}),
       raw: projectRaw,
     },
@@ -1186,10 +1199,6 @@ function reportRootNodes(context: ParseContext, root: XmlElement): void {
     indexes.set(node.name, index + 1);
     if (CORE_ROOT_ELEMENTS.has(node.name)) continue;
     const path = `$.Project.${node.name}[${index}]`;
-    if (node.name === "MaskingParameter" && isNoopMaskingParameter(node)) {
-      reportPreservedNoopMasking(context, node, path);
-      continue;
-    }
     reportUnmappedNode(
       context,
       node,
@@ -1201,10 +1210,490 @@ function reportRootNodes(context: ParseContext, root: XmlElement): void {
   }
 }
 
-function hasNoopMaskingParameter(root: XmlElement): boolean {
-  return root.children.some(
-    (node) => node.name === "MaskingParameter" && isNoopMaskingParameter(node),
+function parseV1MaskingParameter(
+  context: ParseContext,
+  root: XmlElement,
+): ParsedV1MaskingParameter | undefined {
+  const nodes = childElements(root, "MaskingParameter");
+  if (nodes.length === 0) return undefined;
+  const path = "$.Project.MaskingParameter[0]";
+  if (nodes.length > 1) {
+    invalid(
+      context,
+      "$.Project.MaskingParameter",
+      "V1_DUPLICATE_ELEMENT",
+      `Expected at most one <MaskingParameter> element, found ${nodes.length}.`,
+    );
+  }
+
+  const node = nodes[0]!;
+  const diagnosticStart = context.diagnostics.length;
+  const typeNode = requiredElement(context, node, "Type", `${path}.Type`);
+  const rawType = typeNode
+    ? readRoiLeaf(context, typeNode, `${path}.Type`, true)
+    : undefined;
+  if (!rawType) return undefined;
+  const type = rawType.trim().toLocaleLowerCase("en-US");
+
+  if (type === "not set") {
+    if (!isNoopMaskingParameter(node)) {
+      unsupportedRoi(
+        context,
+        path,
+        "V1_ROI_STRUCTURE_UNSUPPORTED",
+        "Only the verified disabled masking form <MaskingParameter><Type>Not set</Type></MaskingParameter> is supported.",
+      );
+    } else {
+      reportPreservedNoopMasking(context, node, path);
+    }
+    return { roi: { mode: "none" }, roiMode: "no" };
+  }
+
+  if (type !== "simple") {
+    unsupportedRoi(
+      context,
+      `${path}.Type`,
+      "V1_ROI_TYPE_UNSUPPORTED",
+      `Active V1 ROI type '${rawType}' has no verified cross-version mapping.`,
+      { roiType: rawType },
+    );
+    return { roiMode: rawType };
+  }
+
+  const roi = parseV1SimpleRectangleRoi(context, node, path);
+  const blocked = context.diagnostics
+    .slice(diagnosticStart)
+    .some((diagnostic) => diagnostic.disposition === "block");
+  if (!roi || blocked) return { roiMode: "simple" };
+  compatibility(context, {
+    code: "V1_SIMPLE_RECTANGLE_ROI_MAPPED",
+    severity: "info",
+    disposition: "rebuild",
+    path,
+    message: "V1 Simple Rectangle ROI is mapped as normalized image boundaries.",
+    details: {
+      left: roi.left,
+      top: roi.top,
+      right: roi.right,
+      bottom: roi.bottom,
+    },
+  });
+  return { roi, roiMode: "simple" };
+}
+
+function parseV1SimpleRectangleRoi(
+  context: ParseContext,
+  node: XmlElement,
+  path: string,
+): Extract<ProjectRoiIR, { readonly mode: "simple" }> | undefined {
+  reportUnsupportedRoiAttributes(context, node, new Set(), path);
+  reportUnsupportedRoiChildren(
+    context,
+    node,
+    new Set(["Type", "RoiRectangle", "RoiSetting", "BlindGroup"]),
+    path,
   );
+
+  const rectangle = requiredElement(
+    context,
+    node,
+    "RoiRectangle",
+    `${path}.RoiRectangle`,
+  );
+  const setting = requiredElement(
+    context,
+    node,
+    "RoiSetting",
+    `${path}.RoiSetting`,
+  );
+  const blindGroup = requiredElement(
+    context,
+    node,
+    "BlindGroup",
+    `${path}.BlindGroup`,
+  );
+
+  const geometry = rectangle
+    ? parseV1RoiRectangle(context, rectangle, `${path}.RoiRectangle`)
+    : undefined;
+  if (setting) {
+    validateDefaultV1RoiSetting(context, setting, `${path}.RoiSetting`);
+  }
+  if (blindGroup) {
+    validateDefaultV1BlindGroup(context, blindGroup, `${path}.BlindGroup`);
+  }
+
+  if (!geometry) return undefined;
+  return {
+    mode: "simple",
+    shape: "rectangle",
+    ...geometry,
+  };
+}
+
+function parseV1RoiRectangle(
+  context: ParseContext,
+  node: XmlElement,
+  path: string,
+):
+  | {
+      readonly left: number;
+      readonly top: number;
+      readonly right: number;
+      readonly bottom: number;
+    }
+  | undefined {
+  reportUnsupportedRoiAttributes(
+    context,
+    node,
+    new Set(["X", "Y", "Width", "Height", "Shape"]),
+    path,
+  );
+  reportUnsupportedRoiChildren(context, node, new Set(), path);
+  rejectRoiElementText(context, node, path);
+
+  const x = parseFiniteRoiNumber(
+    context,
+    requiredRoiAttribute(context, node, "X", `${path}.@X`),
+    `${path}.@X`,
+  );
+  const y = parseFiniteRoiNumber(
+    context,
+    requiredRoiAttribute(context, node, "Y", `${path}.@Y`),
+    `${path}.@Y`,
+  );
+  const width = parseFiniteRoiNumber(
+    context,
+    requiredRoiAttribute(context, node, "Width", `${path}.@Width`),
+    `${path}.@Width`,
+  );
+  const height = parseFiniteRoiNumber(
+    context,
+    requiredRoiAttribute(context, node, "Height", `${path}.@Height`),
+    `${path}.@Height`,
+  );
+  const shape = requiredRoiAttribute(
+    context,
+    node,
+    "Shape",
+    `${path}.@Shape`,
+  );
+  const shapeSupported =
+    shape?.trim().toLocaleLowerCase("en-US") === "rectangle";
+  if (shape !== undefined && !shapeSupported) {
+    unsupportedRoi(
+      context,
+      `${path}.@Shape`,
+      "V1_ROI_SHAPE_UNSUPPORTED",
+      `V1 ROI shape '${shape}' is not supported; only Rectangle is verified.`,
+      { shape },
+    );
+  }
+
+  if (
+    x === undefined ||
+    y === undefined ||
+    width === undefined ||
+    height === undefined ||
+    !shapeSupported
+  ) {
+    return undefined;
+  }
+  const right = x + width;
+  const bottom = y + height;
+  if (
+    x < 0 ||
+    y < 0 ||
+    width <= 0 ||
+    height <= 0 ||
+    right > 1 ||
+    bottom > 1
+  ) {
+    invalid(
+      context,
+      path,
+      "V1_ROI_BOUNDS_INVALID",
+      "V1 ROI rectangle must have positive area and remain inside normalized image bounds.",
+      { x, y, width, height, right, bottom },
+    );
+    return undefined;
+  }
+  return { left: x, top: y, right, bottom };
+}
+
+function validateDefaultV1RoiSetting(
+  context: ParseContext,
+  node: XmlElement,
+  path: string,
+): void {
+  reportUnsupportedRoiAttributes(context, node, new Set(), path);
+  reportUnsupportedRoiChildren(
+    context,
+    node,
+    new Set(["Intensity", "Expansion", "Inversion", "Offset"]),
+    path,
+  );
+  const intensity = requiredElement(context, node, "Intensity", `${path}.Intensity`);
+  const expansion = requiredElement(context, node, "Expansion", `${path}.Expansion`);
+  const inversion = requiredElement(context, node, "Inversion", `${path}.Inversion`);
+  const offset = requiredElement(context, node, "Offset", `${path}.Offset`);
+
+  if (intensity) {
+    validateDefaultRoiAttributeElement(
+      context,
+      intensity,
+      `${path}.Intensity`,
+      { Min: 0, Max: 255 },
+    );
+  }
+  if (expansion) {
+    validateDefaultRoiAttributeElement(
+      context,
+      expansion,
+      `${path}.Expansion`,
+      { Value: 0 },
+    );
+  }
+  if (inversion) {
+    reportUnsupportedRoiAttributes(
+      context,
+      inversion,
+      new Set(["Value"]),
+      `${path}.Inversion`,
+    );
+    reportUnsupportedRoiChildren(context, inversion, new Set(), `${path}.Inversion`);
+    rejectRoiElementText(context, inversion, `${path}.Inversion`);
+    const value = requiredRoiAttribute(
+      context,
+      inversion,
+      "Value",
+      `${path}.Inversion.@Value`,
+    );
+    const parsed = parseRequiredBoolean(
+      context,
+      value,
+      `${path}.Inversion.@Value`,
+      "V1_ROI_SETTING_INVALID",
+    );
+    if (parsed === true) {
+      unsupportedRoi(
+        context,
+        `${path}.Inversion.@Value`,
+        "V1_ROI_SETTING_UNSUPPORTED",
+        "Only the verified default ROI inversion value False is supported.",
+        { value: true },
+      );
+    }
+  }
+  if (offset) {
+    validateDefaultRoiAttributeElement(
+      context,
+      offset,
+      `${path}.Offset`,
+      { Left: 100, Right: 100, Top: 100, Bottom: 100 },
+    );
+  }
+}
+
+function validateDefaultV1BlindGroup(
+  context: ParseContext,
+  node: XmlElement,
+  path: string,
+): void {
+  reportUnsupportedRoiAttributes(context, node, new Set(), path);
+  reportUnsupportedRoiChildren(
+    context,
+    node,
+    new Set(["NumberOfBlinds"]),
+    path,
+  );
+  const countText = requiredRoiLeaf(
+    context,
+    node,
+    "NumberOfBlinds",
+    `${path}.NumberOfBlinds`,
+  );
+  const count = parseNonNegativeInteger(
+    context,
+    countText,
+    `${path}.NumberOfBlinds`,
+    "V1_ROI_BLIND_COUNT_INVALID",
+  );
+  if (count !== undefined && count !== 0) {
+    unsupportedRoi(
+      context,
+      `${path}.NumberOfBlinds`,
+      "V1_ROI_BLINDS_UNSUPPORTED",
+      "V1 ROI blind regions are not yet supported.",
+      { numberOfBlinds: count },
+    );
+  }
+}
+
+function validateDefaultRoiAttributeElement(
+  context: ParseContext,
+  node: XmlElement,
+  path: string,
+  expected: Readonly<Record<string, number>>,
+): void {
+  reportUnsupportedRoiAttributes(context, node, new Set(Object.keys(expected)), path);
+  reportUnsupportedRoiChildren(context, node, new Set(), path);
+  rejectRoiElementText(context, node, path);
+  for (const [name, expectedValue] of Object.entries(expected)) {
+    const attributePath = `${path}.@${name}`;
+    const raw = requiredRoiAttribute(context, node, name, attributePath);
+    const value = parseFiniteRoiNumber(context, raw, attributePath);
+    if (value !== undefined && value !== expectedValue) {
+      unsupportedRoi(
+        context,
+        attributePath,
+        "V1_ROI_SETTING_UNSUPPORTED",
+        `Only the verified default ROI ${name} value ${expectedValue} is supported.`,
+        { expected: expectedValue, actual: value },
+      );
+    }
+  }
+}
+
+function requiredRoiLeaf(
+  context: ParseContext,
+  parent: XmlElement,
+  name: string,
+  path: string,
+): string | undefined {
+  const element = requiredElement(context, parent, name, path);
+  return element ? readRoiLeaf(context, element, path, true) : undefined;
+}
+
+function readRoiLeaf(
+  context: ParseContext,
+  element: XmlElement,
+  path: string,
+  required: boolean,
+): string | undefined {
+  reportUnsupportedRoiAttributes(context, element, new Set(), path);
+  if (element.children.length > 0) {
+    invalid(context, path, "V1_LEAF_HAS_CHILDREN", `<${element.name}> must contain text only.`);
+    return undefined;
+  }
+  const value = element.textParts.join("").trim();
+  if (required && value === "") {
+    invalid(context, path, "V1_REQUIRED_VALUE_EMPTY", `<${element.name}> cannot be empty.`);
+    return undefined;
+  }
+  return value === "" ? undefined : value;
+}
+
+function requiredRoiAttribute(
+  context: ParseContext,
+  node: XmlElement,
+  name: string,
+  path: string,
+): string | undefined {
+  const value = node.attributes.get(name);
+  if (value === undefined || value.trim() === "") {
+    invalid(
+      context,
+      path,
+      "V1_ROI_ATTRIBUTE_MISSING",
+      `Required ROI attribute '${name}' is missing or empty.`,
+    );
+    return undefined;
+  }
+  return value;
+}
+
+function parseFiniteRoiNumber(
+  context: ParseContext,
+  value: string | undefined,
+  path: string,
+): number | undefined {
+  if (
+    value === undefined ||
+    !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value.trim())
+  ) {
+    if (value !== undefined) {
+      invalid(context, path, "V1_ROI_NUMBER_INVALID", "ROI values must be finite numbers.");
+    }
+    return undefined;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number) || Math.abs(number) > Number.MAX_SAFE_INTEGER) {
+    invalid(context, path, "V1_ROI_NUMBER_INVALID", "ROI value is outside the safe numeric range.");
+    return undefined;
+  }
+  return number;
+}
+
+function reportUnsupportedRoiAttributes(
+  context: ParseContext,
+  element: XmlElement,
+  known: ReadonlySet<string>,
+  path: string,
+): void {
+  for (const [name, value] of element.attributes) {
+    if (known.has(name)) continue;
+    unsupportedRoi(
+      context,
+      `${path}.@${name}`,
+      "V1_ROI_STRUCTURE_UNSUPPORTED",
+      `ROI attribute '${name}' on <${element.name}> has no verified mapping.`,
+      { nodeName: element.name, attributeName: name, value },
+    );
+  }
+}
+
+function reportUnsupportedRoiChildren(
+  context: ParseContext,
+  parent: XmlElement,
+  known: ReadonlySet<string>,
+  path: string,
+): void {
+  const indexes = new Map<string, number>();
+  for (const node of parent.children) {
+    const index = indexes.get(node.name) ?? 0;
+    indexes.set(node.name, index + 1);
+    if (known.has(node.name)) continue;
+    unsupportedRoi(
+      context,
+      `${path}.${node.name}[${index}]`,
+      "V1_ROI_STRUCTURE_UNSUPPORTED",
+      `ROI node <${node.name}> has no verified mapping.`,
+      { nodeName: node.name },
+    );
+  }
+}
+
+function rejectRoiElementText(
+  context: ParseContext,
+  node: XmlElement,
+  path: string,
+): void {
+  if (node.textParts.join("").trim() !== "") {
+    invalid(
+      context,
+      path,
+      "V1_ROI_ELEMENT_TEXT_INVALID",
+      `<${node.name}> must not contain text.`,
+    );
+  }
+}
+
+function unsupportedRoi(
+  context: ParseContext,
+  path: string,
+  code: string,
+  message: string,
+  details?: Readonly<Record<string, JsonValue>>,
+): void {
+  compatibility(context, {
+    code,
+    severity: "error",
+    disposition: "block",
+    path,
+    message,
+    ...(details ? { details } : {}),
+  });
 }
 
 function isNoopMaskingParameter(node: XmlElement): boolean {

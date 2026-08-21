@@ -221,6 +221,74 @@ test("V1 polygon segmentation writes the native V2 schema with hole winding", ()
   assert.equal(area(rings[1]!), -16);
 });
 
+test("V1 segmentation preserves a custom rectangle ROI in native V2 fields", () => {
+  const source = segmentationProject();
+  const expectedRoi = {
+    mode: "simple" as const,
+    shape: "rectangle" as const,
+    left: 0.1,
+    top: 0.2,
+    right: 0.8,
+    bottom: 0.9,
+  };
+  const written = writeV2SubvisionProject({
+    ...source,
+    project: { ...source.project, roi: expectedRoi },
+  });
+  assert.equal(written.ok, true);
+  if (!written.ok) return;
+
+  const root = written.json.project as JsonObject;
+  assert.equal(root.roiMode, "simple");
+  assert.equal(root.roiPosX, expectedRoi.left);
+  assert.equal(root.roiPosY, expectedRoi.top);
+  assert.equal(root.roiWidth, expectedRoi.right);
+  assert.equal(root.roiHeight, expectedRoi.bottom);
+  assert.equal(root.roiShapeType, "rectangle");
+  assert.equal(typeof root.roiShape, "string");
+  assert.equal(root.roiBitmap, undefined);
+
+  const reparsed = parseV2SubvisionProject({ jsonText: written.jsonText });
+  assert.equal(reparsed.ok, true);
+  if (!reparsed.ok) return;
+  assert.deepEqual(reparsed.project.project.roi, expectedRoi);
+  assert.equal(
+    reparsed.diagnostics.some((item) => item.code === "V2_ROI_SHAPE_CONFLICT"),
+    false,
+  );
+});
+
+test("V1 Segmentation Validation writes the native V2 val split token", () => {
+  const source = segmentationProject();
+  const validationProject: ProjectIR = {
+    ...source,
+    files: source.files.map((file) => ({
+      ...file,
+      splits: [{ type: "validation", rawType: "Validation", raw: {} }],
+      canonicalSplit: "validation",
+    })),
+  };
+
+  const written = writeV2SubvisionProject(validationProject);
+  assert.equal(written.ok, true);
+  if (!written.ok) return;
+
+  const projectJson = written.json.project as JsonObject;
+  const fileJson = (projectJson.projectFiles as JsonObject[])[0]!;
+  assert.deepEqual(fileJson.splitSets, [
+    {
+      splitId: Number(projectJson.projectId) + 2,
+      splitName: "srproj",
+      splitType: "val",
+    },
+  ]);
+
+  const reparsed = parseV2SubvisionProject({ jsonText: written.jsonText });
+  assert.equal(reparsed.ok, true);
+  if (!reparsed.ok) return;
+  assert.equal(reparsed.project.files[0]?.canonicalSplit, "validation");
+});
+
 test("segmentation converts V1 to V2 and back without losing ring roles", () => {
   const v2 = writeV2SubvisionProject(segmentationProject());
   assert.equal(v2.ok, true);

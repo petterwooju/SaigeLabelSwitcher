@@ -113,18 +113,16 @@ const uiCopy = {
     directorySizeLimit: `所选目录候选图片总大小超过 ${formatLimitBytes(DEFAULT_DIRECTORY_MAX_TOTAL_BYTES)}。`,
     imageFilesNeedPaths: "该项目含有同名图片，直接多选文件会丢失所属目录，无法安全匹配。请改用图片 ZIP，或在桌面版 Edge/Chrome 中选择目录。",
     imageZipEmpty: "所选 ZIP 中没有找到受支持的图片。请保留原图片目录结构后重新压缩。",
-    trainingSettingsNotMapped: "V1 的训练参数和数据增强设置不会写入 V2；图片、类别、标注及训练/验证划分不受影响。导入后请在 V2 中重新确认训练设置。",
     unmappedSourceField: "这个 V1 设置没有经过验证的 V2 对应字段，转换时不会写入目标项目。",
     diagnosticTimestampLoss: "目标格式不会保留源项目中的部分时间戳或内部标识字段。",
     diagnosticSplitLoss: "目标格式会规范化数据划分，部分划分名称、标识或多重归属无法保留。",
     diagnosticGeometryLoss: "目标格式无法完整保留部分标注几何信息。",
-    diagnosticRoiLoss: "目标格式没有经过验证的自定义 ROI 对应方式。",
+    diagnosticRoiLoss: "此 ROI 模式、形状或参数没有经过验证的跨版本映射。当前仅支持未启用和 Simple Rectangle。",
     diagnosticCompatibilityError: "该兼容性问题会阻止安全转换。",
     diagnosticCompatibilityWarning: "目标格式无法完整保留此项源信息。",
     diagnosticSecurityError: "项目包含不安全或超出限制的内容，已停止处理。",
     diagnosticValidationError: "项目内容无效或不完整，无法安全处理。",
     diagnosticValidationWarning: "项目内容存在需要注意的问题。",
-    helperUnsigned: "V1 完整项目 ZIP 会包含固定哈希校验的路径修复助手；该助手目前没有 Authenticode 签名。企业环境请先由管理员审批。",
     dimensions: "正在读取图片尺寸…",
     imageFailure: "部分图片无法读取或不是受支持的图片格式。",
     imageDimensionsMismatch: "项目记录的图片尺寸与实际图片不一致，已停止转换。",
@@ -164,18 +162,16 @@ const uiCopy = {
     directorySizeLimit: `The candidate images in the selected folder exceed ${formatLimitBytes(DEFAULT_DIRECTORY_MAX_TOTAL_BYTES)}.`,
     imageFilesNeedPaths: "This project contains duplicate image filenames. Direct file selection loses their folders and cannot be matched safely. Choose an image ZIP, or select the folder in desktop Edge/Chrome.",
     imageZipEmpty: "No supported images were found in the selected ZIP. Preserve the original image folder structure and create the ZIP again.",
-    trainingSettingsNotMapped: "V1 training and augmentation settings will not be written to V2. Images, classes, labels, and the training/validation split are unaffected. Review the training settings in V2 after import.",
     unmappedSourceField: "This V1 setting has no verified V2 equivalent and will not be written to the target project.",
     diagnosticTimestampLoss: "The target format does not preserve some source timestamps or internal identifiers.",
     diagnosticSplitLoss: "The target format normalizes dataset splits, so some split names, identifiers, or multiple memberships cannot be preserved.",
     diagnosticGeometryLoss: "The target format cannot fully preserve some annotation geometry.",
-    diagnosticRoiLoss: "The target format has no verified mapping for the custom ROI.",
+    diagnosticRoiLoss: "This ROI mode, shape, or setting has no verified cross-version mapping. Only disabled ROI and Simple Rectangle are currently supported.",
     diagnosticCompatibilityError: "This compatibility issue prevents a safe conversion.",
     diagnosticCompatibilityWarning: "The target format cannot fully preserve this source information.",
     diagnosticSecurityError: "The project contains unsafe content or exceeds a safety limit, so processing stopped.",
     diagnosticValidationError: "The project content is invalid or incomplete and cannot be processed safely.",
     diagnosticValidationWarning: "The project content has an issue that needs attention.",
-    helperUnsigned: "The V1 complete project ZIP includes a hash-pinned path repair helper. It is not currently Authenticode-signed; obtain administrator approval before enterprise use.",
     dimensions: "Reading image dimensions…",
     imageFailure: "Some files could not be read as supported images.",
     imageDimensionsMismatch: "A recorded image size does not match the actual file, so conversion stopped.",
@@ -215,18 +211,16 @@ const uiCopy = {
     directorySizeLimit: `선택한 폴더의 후보 이미지 총크기가 ${formatLimitBytes(DEFAULT_DIRECTORY_MAX_TOTAL_BYTES)}를 초과합니다.`,
     imageFilesNeedPaths: "이 프로젝트에는 이름이 같은 이미지가 있습니다. 파일 직접 선택은 폴더 정보를 잃어 안전하게 일치시킬 수 없습니다. 이미지 ZIP을 선택하거나 데스크톱 Edge/Chrome에서 폴더를 선택하세요.",
     imageZipEmpty: "선택한 ZIP에서 지원되는 이미지를 찾지 못했습니다. 원본 이미지 폴더 구조를 유지하여 다시 압축하세요.",
-    trainingSettingsNotMapped: "V1 학습 및 데이터 증강 설정은 V2에 기록되지 않습니다. 이미지, 클래스, 라벨, 학습/검증 분할에는 영향이 없습니다. 가져온 뒤 V2에서 학습 설정을 다시 확인하세요.",
     unmappedSourceField: "이 V1 설정에는 검증된 V2 대응 필드가 없어 대상 프로젝트에 기록되지 않습니다.",
     diagnosticTimestampLoss: "대상 형식은 원본 프로젝트의 일부 타임스탬프 또는 내부 식별자를 보존하지 않습니다.",
     diagnosticSplitLoss: "대상 형식에서 데이터 분할을 정규화하므로 일부 분할 이름, 식별자 또는 다중 소속을 보존할 수 없습니다.",
     diagnosticGeometryLoss: "대상 형식은 일부 라벨 도형 정보를 완전히 보존할 수 없습니다.",
-    diagnosticRoiLoss: "대상 형식에는 사용자 지정 ROI에 대해 검증된 매핑이 없습니다.",
+    diagnosticRoiLoss: "이 ROI 모드, 도형 또는 설정에는 검증된 버전 간 매핑이 없습니다. 현재 비활성 ROI와 Simple Rectangle만 지원합니다.",
     diagnosticCompatibilityError: "이 호환성 문제로 인해 안전하게 변환할 수 없습니다.",
     diagnosticCompatibilityWarning: "대상 형식은 이 원본 정보를 완전히 보존할 수 없습니다.",
     diagnosticSecurityError: "프로젝트에 안전하지 않거나 제한을 초과한 내용이 있어 처리를 중지했습니다.",
     diagnosticValidationError: "프로젝트 내용이 유효하지 않거나 불완전하여 안전하게 처리할 수 없습니다.",
     diagnosticValidationWarning: "프로젝트 내용에 확인이 필요한 문제가 있습니다.",
-    helperUnsigned: "V1 전체 프로젝트 ZIP에는 해시로 고정 검증되는 경로 복구 도구가 포함됩니다. 현재 Authenticode 서명이 없으므로 기업 환경에서는 관리자 승인을 받으세요.",
     dimensions: "이미지 크기를 읽는 중…",
     imageFailure: "일부 파일을 지원되는 이미지로 읽을 수 없습니다.",
     imageDimensionsMismatch: "프로젝트에 기록된 이미지 크기와 실제 파일이 일치하지 않아 변환을 중지했습니다.",
@@ -993,7 +987,7 @@ export function ProjectConverter() {
         if (target === "subvisionproj") {
           const result = writeV2SubvisionProject(workingProject, {
             externalPaths: externalPathsForProject(originalProject),
-            allowConfirmedLoss: confirmationChecked,
+            allowConfirmedLoss: confirmationChecked || !needsConfirmation,
           });
           if (!result.ok) throw new WriterDiagnosticsError(result.diagnostics);
           updateProgress({ stage: "finalizing" });
@@ -1005,7 +999,7 @@ export function ProjectConverter() {
           );
         } else if (target === "visionproj") {
           const result = writeV2VisionProject(workingProject, {
-            allowConfirmedLoss: confirmationChecked,
+            allowConfirmedLoss: confirmationChecked || !needsConfirmation,
           });
           if (!result.ok) throw new WriterDiagnosticsError(result.diagnostics);
           if (!resolved) throw new Error(uiCopy[language].selectImages);
@@ -1022,7 +1016,7 @@ export function ProjectConverter() {
             destination,
             writeSrproj(workingProject, {
               pathForFile: (file) => unquotePath(file.sourcePath),
-              allowConfirmedLoss: confirmationChecked,
+              allowConfirmedLoss: confirmationChecked || !needsConfirmation,
             }),
             "application/xml;charset=utf-8",
             signal,
@@ -1129,13 +1123,6 @@ export function ProjectConverter() {
           severity: "error" as const,
           code: "V2_WRITE_EXTERNAL_PATH_ABSOLUTE_REQUIRED",
           message: uiCopy[language].relativeSubvision,
-        }]
-      : []),
-    ...(target === "svpa-zip"
-      ? [{
-          severity: "warning" as const,
-          code: "SVPA_HELPER_UNSIGNED",
-          message: uiCopy[language].helperUnsigned,
         }]
       : []),
   ];
@@ -1423,27 +1410,12 @@ function toUiDiagnostics(
   target: ConverterOutputFormat | null,
 ): ConverterDiagnostic[] {
   const result: ConverterDiagnostic[] = [];
-  let trainingSettingsAdded = false;
   for (const item of diagnostics) {
     if (item.category === "compatibility" && !includeCompatibility) continue;
     if (!targetIncludesDiagnostic(item, target)) {
       continue;
     }
     if (item.severity === "info") continue;
-    const nodeName = String(item.details?.nodeName ?? "");
-    if (
-      item.code === "V1_UNMAPPED_XML_NODE" &&
-      (nodeName === "TrainingParameter" || nodeName === "AugmentationParameter")
-    ) {
-      if (!trainingSettingsAdded) {
-        result.push({
-          severity: "warning",
-          message: uiCopy[language].trainingSettingsNotMapped,
-        });
-        trainingSettingsAdded = true;
-      }
-      continue;
-    }
     result.push(toUiDiagnostic(item, language));
   }
   return result;
