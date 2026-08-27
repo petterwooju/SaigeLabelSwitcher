@@ -74,6 +74,7 @@ test("target-specific path rules keep portable SVPA output available", () => {
 
 test("routine V2 audit metadata stays in technical diagnostics without prompting users", () => {
   const routineMetadata = [
+    "V2_FILE_METADATA_NOT_IN_V1",
     "V2_FILE_TIMESTAMP_NOT_IN_V1",
     "V2_LABEL_TIMESTAMP_NOT_IN_V1",
     "V2_SPLIT_NAME_NOT_IN_V1",

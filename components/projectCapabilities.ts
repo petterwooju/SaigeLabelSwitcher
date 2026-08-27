@@ -33,6 +33,7 @@ const VERIFIED_OUTPUTS: OutputMatrix = {
 // membership. Keep them in the parser diagnostics for technical reports without
 // turning them into user actions in the converter UI.
 const NON_ACTIONABLE_V2_TO_V1_DIAGNOSTICS = new Set([
+  "V2_FILE_METADATA_NOT_IN_V1",
   "V2_FILE_TIMESTAMP_NOT_IN_V1",
   "V2_LABEL_TIMESTAMP_NOT_IN_V1",
   "V2_SPLIT_NAME_NOT_IN_V1",
