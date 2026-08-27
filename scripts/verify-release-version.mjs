@@ -32,7 +32,9 @@ const packageLock = JSON.parse(await readText("package-lock.json"));
 const releaseSource = await readText("lib/release.ts");
 const postcssSource = await readText("postcss.config.mjs");
 const readme = await readText("README.md");
+const thirdPartyNotices = await readText("THIRD_PARTY_NOTICES.md");
 const workflow = await readText(".github/workflows/ci.yml");
+await readText("scripts/verify-release-tag.mjs");
 await readText(".openai/hosting.json");
 
 const releaseMatch = /APP_VERSION\s*=\s*"([^"]+)"/u.exec(releaseSource);
@@ -77,6 +79,7 @@ assert(
 
 const releaseSurfaceFiles = [
   "README.md",
+  "THIRD_PARTY_NOTICES.md",
   "docs/SECURITY.md",
   "docs/MVP_SPEC.md",
   "docs/IMPLEMENTATION_PLAN.md",
@@ -97,8 +100,10 @@ for (const relativePath of releaseSurfaceFiles) {
 assert(
   readme.includes("GitHub Pages") &&
     readme.includes("正式生产发布的唯一来源") &&
-    readme.includes("Sites 兼容的备用预览"),
-  "README must identify GitHub Pages as production and Sites as backup.",
+    readme.includes("Sites 兼容的备用预览") &&
+    readme.includes("陈旧备用环境") &&
+    readme.includes("不能为单个仓库配置任意 HTTP 响应安全头"),
+  "README must document Pages production, stale Sites fallback, and response-header limits.",
 );
 assert(
   packageJson.scripts?.build?.includes("vinext"),
@@ -111,6 +116,27 @@ assert(
 assert(
   workflow.includes("npm run verify:release"),
   "CI must run the release-version gate explicitly.",
+);
+assert(
+  /tags:\s*\n\s*- ["']v\*["']/u.test(workflow) &&
+    workflow.includes("fetch-depth: 0") &&
+    workflow.includes("if: github.ref_type == 'tag'") &&
+    workflow.includes("npm run verify:release:tag"),
+  "CI must fetch tag history and run the tag/version/commit release gate.",
+);
+
+for (const [name, version] of Object.entries(packageJson.dependencies ?? {})) {
+  assert(
+    thirdPartyNotices.includes(`| \`${name}\` | \`${version}\` |`),
+    `THIRD_PARTY_NOTICES.md does not list production dependency ${name}@${version}.`,
+  );
+}
+assert(
+  thirdPartyNotices.includes("仓库根目录目前没有 `LICENSE`") &&
+    thirdPartyNotices.includes("仍需仓库所有者明确决定") &&
+    thirdPartyNotices.includes("SaigeVisionProjectAssistant.ZipFixer.exe") &&
+    thirdPartyNotices.includes("image-size-2.0.3-saige.2.tgz"),
+  "third-party notices must retain root-license, helper, and vendored-fork governance.",
 );
 
 console.log(

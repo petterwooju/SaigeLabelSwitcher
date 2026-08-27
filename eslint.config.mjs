@@ -12,6 +12,7 @@ const eslintConfig = defineConfig([
     ".next/**",
     "dist/**",
     "out/**",
+    "public/workers/**",
     "build/**",
     "vendor/image-size-safe/bin/**",
     "vendor/image-size-safe/dist/**",

@@ -2,7 +2,7 @@
 
 SaigeVision V1 / V2 项目文件的纯浏览器双向转换 Webapp。项目、标注和图片只在用户浏览器本机读取与写入，不经过服务器。
 
-> 当前发布：`v0.0.2`。本版本只开放经过真实样本验证的 `Classification` 和多边形 `Segmentation`；其他项目类型留待后续版本。
+> 当前发布：`v0.0.3`。本版本只开放经过真实样本验证的 `Classification` 和多边形 `Segmentation`；其他项目类型留待后续版本。
 
 ## 当前支持
 
@@ -49,7 +49,11 @@ npm.cmd run dev
 
 该站点是公开静态页面，但项目文件、标注和图片仍只由浏览器本机读取与写入；应用没有项目上传接口、数据库或对象存储。上线时自定义域名的 DNS CNAME 目标为 `petterwooju.github.io`，与 `svpa-export-beta.saigeai.com` 使用相同的发布方式。
 
-GitHub Pages 与上述自定义域名是正式生产发布的唯一来源。仓库保留 `.openai/hosting.json` 和 Vinext 配置，仅用于 Sites 兼容的备用预览/应急构建，不作为正式域名的发布链路。
+GitHub Pages 与上述自定义域名是正式生产发布的唯一来源。仓库保留 `.openai/hosting.json` 和 Vinext 配置，仅用于 Sites 兼容的备用预览/应急构建，不作为正式域名的发布链路。现有 Sites 备用部署可能落后于 `main`，属于陈旧备用环境，不能作为发布验收依据。
+
+GitHub Pages 不能为单个仓库配置任意 HTTP 响应安全头；页面内保留 CSP `meta` 和 Referrer Policy 作为浏览器侧补充，但它们不等同于服务器响应头。若未来需要 HSTS、完整 CSP 等响应头门禁，应迁移到可控制响应头的静态托管服务，并单独完成安全评审。
+
+发布 tag 必须使用 `vX.Y.Z`，与 `package.json` 完全一致并指向 Actions 实际检出的同一提交；CI 在 tag 事件中强制验证这三者，普通 `main`/PR 构建只做常规版本一致性验证。
 
 ## 验证
 
@@ -62,7 +66,7 @@ npm.cmd run audit:dependencies
 
 `check` 固定执行 typecheck、lint、单元/安全测试、全新生产构建和构建产物 SSR 测试。测试覆盖四格式内容识别、V1/V2 round-trip、原生 V2 2.7.8 fixture、SVPA/vision 容器、官方 SVPA 路径规则、图片目录匹配、图片真实性、ZIP/XML/JSON 资源限制、取消操作和大文件流式保存门禁。
 
-`test:pages` 生成并核验 GitHub Pages 静态站点，包括正式域名元数据、v0.0.2 页面内容和路径修复助手的 SHA-256。
+`test:pages` 生成并核验 GitHub Pages 静态站点，包括正式域名元数据、当前 `APP_VERSION` 页面内容和路径修复助手的 SHA-256。
 
 `test:e2e:prepared` 使用桌面 Chrome 加载刚生成的 `out` 静态产物，实际下载并回读 `.srproj` 与 `SVPA.zip`；请先运行 `test:pages`。也可运行 `npm.cmd run test:e2e` 一次完成静态构建和浏览器验收。
 
@@ -73,7 +77,8 @@ npm.cmd run audit:dependencies
 - [MVP 产品与格式规格](docs/MVP_SPEC.md)
 - [实施与验收计划](docs/IMPLEMENTATION_PLAN.md)
 - [安全边界、依赖例外与发布凭据](docs/SECURITY.md)
+- [第三方依赖、vendored 组件与许可证状态](THIRD_PARTY_NOTICES.md)
 
 SVPA 包中的路径修复助手来自参考项目 `SaigeVision-v1-project-export`。应用在写入每个 SVPA 包之前会固定校验其大小和 SHA-256；当前固定值为 `A9831278CB21D6AFD627ABB55344545800829F2F5866AA34738609DD446F3A94`。应用不会执行输入 ZIP 中的任何可执行文件。
 
-当前公开 beta 与公开源码仓库中的助手尚未取得可信 Authenticode 代码签名；固定哈希只能确认下载内容与本仓库发布物一致，不能证明发布者身份，Windows 或企业安全策略可能阻止运行。不得引导用户绕过 SmartScreen 或企业策略。进入稳定版或企业分发前，仍需使用组织代码签名证书和可信时间戳重新签名，并同步更新固定哈希与 CI 验签。
+当前公开 beta 与公开源码仓库中的助手尚未取得可信 Authenticode 代码签名；固定哈希只能确认下载内容与本仓库发布物一致，不能证明发布者身份，Windows 或企业安全策略可能阻止运行。不得引导用户绕过 SmartScreen 或企业策略。组织签名和可信时间戳仍是稳定版或企业分发的发布阻断项；完成签名后还必须同步更新固定哈希与 CI 验签。该治理风险只在发布文档和流水线中处理，不重新增加普通转换页面警告。

@@ -15,6 +15,8 @@ import {
   writeV2SubvisionProject,
   writeV2VisionProject,
 } from "../lib/output/v2.ts";
+import { parseV1Srproj } from "../lib/input/v1.ts";
+import { SrprojWriteError, writeSrproj } from "../lib/output/srproj.ts";
 import { parseV2SubvisionProject } from "../lib/input/v2.ts";
 import {
   ARCHIVE_ENTRY_SEGMENT_MAX_BYTES,
@@ -24,6 +26,7 @@ import {
   PROJECT_STRUCTURE_MAX_DEPTH,
   V2_PROJECT_TEXT_MAX_BYTES,
   V2_PROJECT_LIMITS,
+  V1_PROJECT_LIMITS,
 } from "../lib/security/resourceLimits.ts";
 
 function label(index = 0): ProjectLabelIR {
@@ -149,6 +152,98 @@ test("V2 writers reject ProjectIR class, file, label, and split count overflows"
     assert.ok(code(subvision, expectedCode), expectedCode);
     assert.ok(code(vision, expectedCode), expectedCode);
   }
+});
+
+test("V1 writer mirrors parser class and file count limits before serialization", () => {
+  const base = v1Project();
+  for (const [project, expectedCode] of [
+    [
+      {
+        ...base,
+        classes: Array.from(
+          { length: V1_PROJECT_LIMITS.maxClasses + 1 },
+          (_, index) => cls(index),
+        ),
+      },
+      "SRPROJ_CLASS_LIMIT_EXCEEDED",
+    ],
+    [
+      {
+        ...base,
+        files: Array(V1_PROJECT_LIMITS.maxFiles + 1).fill(base.files[0]),
+      },
+      "SRPROJ_FILE_LIMIT_EXCEEDED",
+    ],
+  ] as const) {
+    assert.throws(
+      () => writeSrproj(project),
+      (error: unknown) =>
+        error instanceof SrprojWriteError && error.code === expectedCode,
+    );
+  }
+});
+
+test("V1 writer emits only image paths its parser can read back", () => {
+  const base = v1Project();
+  const exact = `C:\\${"a".repeat(PROJECT_PATH_MAX_BYTES - 3)}`;
+  const exactProject: ProjectIR = {
+    ...base,
+    files: [{
+      ...base.files[0]!,
+      sourcePath: exact,
+      normalizedPath: exact,
+      image: { kind: "external", path: exact },
+    }],
+  };
+  const xml = writeSrproj(exactProject);
+  assert.equal(parseV1Srproj(xml).ok, true);
+
+  const overlong = `${exact}a`;
+  assert.throws(
+    () => writeSrproj({
+      ...exactProject,
+      files: [{
+        ...exactProject.files[0]!,
+        sourcePath: overlong,
+        normalizedPath: overlong,
+        image: { kind: "external", path: overlong },
+      }],
+    }),
+    (error: unknown) =>
+      error instanceof SrprojWriteError &&
+      error.code === "SRPROJ_IMAGE_PATH_LIMIT_EXCEEDED",
+  );
+  assert.throws(
+    () => writeSrproj(exactProject, { pathForFile: () => "C:\\bad\nname.png" }),
+    (error: unknown) =>
+      error instanceof SrprojWriteError &&
+      error.code === "SRPROJ_IMAGE_PATH_CONTROL_CHARACTER",
+  );
+});
+
+test("V1 classification writer never silently drops object-level labels", () => {
+  const base = v1Project();
+  const objectLabel: ProjectLabelIR = {
+    index: 1,
+    kind: "contour",
+    origin: "manual",
+    classIndex: 0,
+    geometry: {
+      contours: [[{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 10 }]],
+      contourRoles: ["outer"],
+    },
+    synthesized: false,
+    raw: {},
+  };
+  assert.throws(
+    () => writeSrproj({
+      ...base,
+      files: [{ ...base.files[0]!, labels: [...base.files[0]!.labels, objectLabel] }],
+    }),
+    (error: unknown) =>
+      error instanceof SrprojWriteError &&
+      error.code === "SRPROJ_CLASSIFICATION_LABEL_KIND_UNSUPPORTED",
+  );
 });
 
 test("V2 writers enforce UTF-8 paths before normalization", () => {

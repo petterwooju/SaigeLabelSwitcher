@@ -258,22 +258,23 @@ function visionArchivePlan(
     assertVisionImageIdentity(entry.source, image);
     return sourceSize(image.source);
   });
+  const names = [
+    built.projectJsonEntryName,
+    ...built.imageEntries.map((entry) => entry.entryName),
+  ];
+  const totalEntryNameBytes = assertContainerArchiveEntryNames(totalFiles, names);
   const totalBytes = assertContainerArchiveLimits(
     totalFiles,
     [jsonBytes, ...imageSizes],
     [{ size: jsonBytes, maximumBytes: V2_PROJECT_TEXT_MAX_BYTES }],
   );
-  const names = [
-    built.projectJsonEntryName,
-    ...built.imageEntries.map((entry) => entry.entryName),
-  ];
   return {
     imageByIndex,
     totalBytes,
     estimatedBytes: estimateZipOutputBytes(
       totalBytes,
       totalFiles,
-      names.reduce((total, name) => safeByteSum(total, utf8Size(name)), 0),
+      totalEntryNameBytes,
     ),
   };
 }
@@ -595,6 +596,10 @@ async function svpaArchivePlan({
     readmeName(language),
     folders.helper,
   ];
+  const totalEntryNameBytes = assertContainerArchiveEntryNames(
+    totalFiles,
+    entryNames,
+  );
   return {
     srprojXml,
     language,
@@ -610,7 +615,7 @@ async function svpaArchivePlan({
     estimatedBytes: estimateZipOutputBytes(
       totalBytes,
       totalFiles,
-      entryNames.reduce((total, name) => safeByteSum(total, utf8Size(name)), 0),
+      totalEntryNameBytes,
     ),
   };
 }
@@ -786,6 +791,59 @@ function assertValidEntrySize(size: number): void {
       "归档条目大小无效。",
     );
   }
+}
+
+/**
+ * Validate the exact names emitted by a container writer against the same
+ * path, per-name, cumulative-name and canonical-uniqueness rules as the ZIP
+ * reader. The returned total can be reused for the output-size estimate.
+ */
+export function assertContainerArchiveEntryNames(
+  totalFiles: number,
+  entryNames: readonly string[],
+): number {
+  assertContainerEntryCount(totalFiles);
+  if (entryNames.length !== totalFiles) {
+    throw new ContainerWriteError(
+      "OUTPUT_ARCHIVE_ENTRY_NAME_COUNT_MISMATCH",
+      "归档资源计划中的条目名称数量不一致。",
+    );
+  }
+
+  const canonicalNames = new Set<string>();
+  let totalEntryNameBytes = 0;
+  for (const name of entryNames) {
+    const validation = validateZipEntryPath(name);
+    if (!validation.safe) {
+      throw new ContainerWriteError(
+        "OUTPUT_ARCHIVE_ENTRY_PATH_UNSAFE",
+        `归档条目路径不安全（${validation.reason}）：${redactPath(name)}`,
+      );
+    }
+    const nameBytes = utf8Size(name);
+    if (nameBytes > BROWSER_ARCHIVE_LIMITS.maxEntryNameBytes) {
+      throw new ContainerWriteError(
+        "OUTPUT_ARCHIVE_ENTRY_NAME_LIMIT_EXCEEDED",
+        "归档条目名称超过安全上限。",
+      );
+    }
+    totalEntryNameBytes = safeByteSum(totalEntryNameBytes, nameBytes);
+    if (totalEntryNameBytes > BROWSER_ARCHIVE_LIMITS.maxTotalEntryNameBytes) {
+      throw new ContainerWriteError(
+        "OUTPUT_ARCHIVE_ENTRY_NAMES_TOTAL_LIMIT_EXCEEDED",
+        "归档条目名称总量超过安全上限。",
+      );
+    }
+    const key = entryKey(validation.normalizedPath);
+    if (canonicalNames.has(key)) {
+      throw new ContainerWriteError(
+        "OUTPUT_ARCHIVE_ENTRY_DUPLICATE",
+        `归档中存在大小写或 Unicode 等价的重复路径：${redactPath(name)}`,
+      );
+    }
+    canonicalNames.add(key);
+  }
+  return totalEntryNameBytes;
 }
 
 function assertValidTextLimit(maximumBytes: number): void {

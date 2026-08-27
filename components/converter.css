@@ -574,6 +574,82 @@
   color: var(--converter-warning);
 }
 
+.converter-shell__legal {
+  padding: 0.9rem 0 0;
+  text-align: center;
+}
+
+.converter-shell__legal a {
+  color: var(--converter-muted);
+  font-size: 0.82rem;
+  text-underline-offset: 0.2em;
+}
+
+.converter-shell__legal a:hover {
+  color: var(--converter-accent);
+}
+
+.converter-shell__legal a:focus-visible {
+  outline: 3px solid var(--converter-accent);
+  outline-offset: 3px;
+}
+
+.converter-image-sources {
+  margin-top: 18px;
+}
+
+.converter-image-sources h3 {
+  margin: 0 0 8px;
+  color: var(--converter-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.converter-image-sources ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.converter-image-sources li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--converter-border);
+  border-radius: 9px;
+  background: var(--converter-surface);
+  padding: 9px 10px;
+}
+
+.converter-image-sources__identity {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.converter-image-sources__identity strong {
+  overflow: hidden;
+  color: var(--converter-text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.converter-image-sources__identity small {
+  color: var(--converter-muted);
+  font-size: 11px;
+}
+
+.converter-image-sources__remove {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 6px 10px;
+}
+
 .converter-spinner {
   display: inline-block;
   flex: 0 0 auto;
@@ -643,6 +719,13 @@
 .converter-issues details ul,
 .converter-diagnostics details ul {
   margin-top: 10px;
+}
+
+.converter-issues__limit {
+  margin: 10px 0 0;
+  color: var(--converter-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .converter-diagnostics {
@@ -968,6 +1051,16 @@
 
   .converter-image-actions__alternatives {
     grid-template-columns: 1fr;
+  }
+
+  .converter-image-sources li {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .converter-image-sources__identity,
+  .converter-image-sources__remove {
+    width: 100%;
   }
 
   .converter-issues li {

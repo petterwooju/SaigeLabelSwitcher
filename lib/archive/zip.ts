@@ -4,6 +4,7 @@ import {
   type FileEntry,
 } from "@zip.js/zip.js";
 import { BROWSER_ARCHIVE_LIMITS } from "../security/resourceLimits.ts";
+import { validateZipEntryPath } from "../security/paths.ts";
 
 export interface ArchiveLimits {
   maxEntries: number;
@@ -60,7 +61,9 @@ export class ArchiveValidationError extends Error {
 export async function openValidatedZip(
   source: Blob,
   limits: Partial<ArchiveLimits> = {},
+  signal?: AbortSignal,
 ): Promise<OpenArchive> {
+  throwIfAborted(signal);
   if (source.size < 4) {
     throw new ArchiveValidationError("ZIP_TOO_SMALL", "ZIP 文件为空或不完整。");
   }
@@ -75,21 +78,24 @@ export async function openValidatedZip(
   });
 
   try {
-    const rawEntries = await reader.getEntries();
-    if (rawEntries.length > resolvedLimits.maxEntries) {
-      throw new ArchiveValidationError(
-        "ZIP_TOO_MANY_ENTRIES",
-        `ZIP 条目数超过安全上限（${resolvedLimits.maxEntries.toLocaleString()}）。`,
-      );
-    }
-
     const files = new Map<string, FileEntry>();
     const canonicalNames = new Map<string, string>();
     const infos: ArchiveEntryInfo[] = [];
+    let entryCount = 0;
     let totalUncompressedBytes = 0;
     let totalEntryNameBytes = 0;
 
-    for (const entry of rawEntries) {
+    // Validate while iterating the central directory. This keeps hostile
+    // metadata bounded and gives AbortSignal a checkpoint between entries.
+    for await (const entry of reader.getEntriesGenerator()) {
+      throwIfAborted(signal);
+      entryCount += 1;
+      if (entryCount > resolvedLimits.maxEntries) {
+        throw new ArchiveValidationError(
+          "ZIP_TOO_MANY_ENTRIES",
+          `ZIP 条目数超过安全上限（${resolvedLimits.maxEntries.toLocaleString()}）。`,
+        );
+      }
       const name = normalizeArchiveEntryName(entry.filename);
       // A ZIP directory conventionally ends in exactly one slash. Validate
       // the directory path itself so the trailing separator is not mistaken
@@ -288,7 +294,19 @@ export async function openValidatedZip(
     };
   } catch (error) {
     await reader.close().catch(() => undefined);
+    if (signal?.aborted || isAbortError(error)) {
+      throw signal?.reason ?? error;
+    }
     if (error instanceof ArchiveValidationError) throw error;
+    if (
+      error instanceof Error &&
+      /unsafe\s+(?:file)?name/iu.test(error.message)
+    ) {
+      throw new ArchiveValidationError(
+        "ZIP_PATH_TRAVERSAL",
+        "ZIP 中存在不安全路径。",
+      );
+    }
     throw new ArchiveValidationError(
       "ZIP_INVALID",
       error instanceof Error
@@ -303,22 +321,10 @@ export function normalizeArchiveEntryName(value: string): string {
 }
 
 export function assertSafeArchiveEntryName(value: string): void {
-  if (!value || value.includes("\0")) {
-    throw new ArchiveValidationError("ZIP_EMPTY_ENTRY", "ZIP 中存在空路径条目。");
-  }
-  if (/^(?:[a-zA-Z]:|\/)/.test(value)) {
-    throw new ArchiveValidationError(
-      "ZIP_ABSOLUTE_ENTRY",
-      `ZIP 中存在绝对路径：${redactPath(value)}`,
-    );
-  }
-  const segments = value.split("/");
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    throw new ArchiveValidationError(
-      "ZIP_PATH_TRAVERSAL",
-      `ZIP 中存在不安全路径：${redactPath(value)}`,
-    );
-  }
+  const validation = validateZipEntryPath(value);
+  if (validation.safe) return;
+  const [code, message] = archivePathError(validation.reason, value);
+  throw new ArchiveValidationError(code, message);
 }
 
 export function canonicalArchiveName(value: string): string {
@@ -472,6 +478,43 @@ function joinChunks(chunks: readonly Uint8Array[], total: number): Uint8Array {
 
 function createAbortError(): DOMException {
   return new DOMException("The operation was aborted.", "AbortError");
+}
+
+function isAbortError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "name" in error &&
+      (error as { readonly name?: unknown }).name === "AbortError",
+  );
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? createAbortError();
+}
+
+function archivePathError(reason: string, value: string): [string, string] {
+  const path = redactPath(value);
+  switch (reason) {
+    case "empty":
+      return ["ZIP_EMPTY_ENTRY", "ZIP 中存在空路径条目。"];
+    case "absolute":
+    case "drive-path":
+      return ["ZIP_ABSOLUTE_ENTRY", `ZIP 中存在绝对路径：${path}`];
+    case "traversal":
+      return ["ZIP_PATH_TRAVERSAL", `ZIP 中存在不安全路径：${path}`];
+    case "control-character":
+      return ["ZIP_CONTROL_CHARACTER_ENTRY", `ZIP 路径包含控制字符：${path}`];
+    case "invalid-character":
+      return ["ZIP_INVALID_ENTRY_NAME", `ZIP 路径不是可移植文件名：${path}`];
+    case "reserved-name":
+      return ["ZIP_RESERVED_ENTRY_NAME", `ZIP 路径使用 Windows 保留名称：${path}`];
+    case "segment-too-long":
+      return ["ZIP_ENTRY_SEGMENT_TOO_LONG", `ZIP 路径段超过安全上限：${path}`];
+    default:
+      return ["ZIP_INVALID_ENTRY_NAME", `ZIP 路径不安全：${path}`];
+  }
 }
 
 function formatBytes(bytes: number): string {

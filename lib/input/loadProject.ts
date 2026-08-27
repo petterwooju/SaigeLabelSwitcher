@@ -23,11 +23,7 @@ import {
   V1_PROJECT_TEXT_MAX_BYTES,
   V2_PROJECT_TEXT_MAX_BYTES,
 } from "../security/resourceLimits.ts";
-import { parseV1Srproj } from "./v1.ts";
-import {
-  parseV2SubvisionProject,
-  parseV2VisionProject,
-} from "./v2.ts";
+import { parseProjectAsync } from "./parseProjectAsync.ts";
 
 export interface SvpaManifestEntry {
   readonly OriginalPath: string;
@@ -98,7 +94,7 @@ export async function loadProject(
   );
   throwIfAborted(signal);
   if (hasZipSignature(signature)) {
-    const archive = await openValidatedZip(sourceFile);
+    const archive = await openValidatedZip(sourceFile, {}, signal);
     try {
       throwIfAborted(signal);
       return await loadArchiveProject(sourceFile, archive, signal);
@@ -128,7 +124,13 @@ export async function loadProject(
   const text = await readUtf8File(sourceFile, signal);
   if (plainFormat === "v1-srproj") {
     const result = withExtensionDiagnostic(
-      parseV1Srproj({ xmlText: text, fileName: sourceFile.name }),
+      await parseProjectAsync(
+        {
+          kind: "v1",
+          input: { xmlText: text, fileName: sourceFile.name },
+        },
+        signal,
+      ),
       sourceFile.name,
       "v1-srproj",
     );
@@ -141,7 +143,13 @@ export async function loadProject(
   }
   if (plainFormat === "v2-subvisionproj") {
     const result = withExtensionDiagnostic(
-      parseV2SubvisionProject({ jsonText: text, fileName: sourceFile.name }),
+      await parseProjectAsync(
+        {
+          kind: "v2-subvision",
+          input: { jsonText: text, fileName: sourceFile.name },
+        },
+        signal,
+      ),
       sourceFile.name,
       "v2-subvisionproj",
     );
@@ -224,14 +232,20 @@ async function loadArchiveProject(
   );
   throwIfAborted(signal);
   const result = withExtensionDiagnostic(
-    parseV2VisionProject({
-      projectJsonText,
-      projectJsonEntryName: projectJsonEntry,
-      // Names are sufficient for schema/reference validation. Image bytes stay
-      // behind OpenArchive and are read only by a later writer.
-      entries: names.map((name) => ({ name })),
-      fileName: sourceFile.name,
-    }),
+    await parseProjectAsync(
+      {
+        kind: "v2-vision",
+        input: {
+          projectJsonText,
+          projectJsonEntryName: projectJsonEntry,
+          // Names are sufficient for schema/reference validation. Image bytes
+          // stay behind OpenArchive and are read only by a later writer.
+          entries: names.map((name) => ({ name })),
+          fileName: sourceFile.name,
+        },
+      },
+      signal,
+    ),
     sourceFile.name,
     "v2-visionproj",
   );
@@ -266,10 +280,16 @@ async function loadSvpaProject(
     signal,
   );
   throwIfAborted(signal);
-  let result = parseV1Srproj({
-    xmlText: projectXmlText,
-    fileName: leafName(manifest.ProjectFile),
-  });
+  let result = await parseProjectAsync(
+    {
+      kind: "v1",
+      input: {
+        xmlText: projectXmlText,
+        fileName: leafName(manifest.ProjectFile),
+      },
+    },
+    signal,
+  );
   if (result.ok) {
     result = bindSvpaImages(result, manifest, sourceFile.name);
   }

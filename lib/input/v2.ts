@@ -40,6 +40,10 @@ import {
   V2_PROJECT_TEXT_MAX_BYTES,
   V2_PROJECT_LIMITS,
 } from "../security/resourceLimits.ts";
+import {
+  validateZipEntryPath,
+  zipEntryComparisonKey,
+} from "../security/paths.ts";
 
 export interface V2ArchiveEntry {
   readonly name: string;
@@ -2179,7 +2183,11 @@ function resolveImageSource(
     return { kind: "external", path: normalizedPath };
   }
 
-  if (!isSafeArchivePath(normalizedPath) || !normalizedPath.startsWith("images/")) {
+  const archivePath = validateZipEntryPath(normalizedPath);
+  if (
+    !archivePath.safe ||
+    !archivePath.normalizedPath.toLocaleLowerCase("en-US").startsWith("images/")
+  ) {
     addDiagnostic(context, {
       code: "V2_ARCHIVE_IMAGE_PATH_UNSAFE",
       category: "security",
@@ -2191,19 +2199,20 @@ function resolveImageSource(
     });
     return undefined;
   }
-  const entry = context.archive?.entriesByName.get(normalizedPath);
+  const safePath = archivePath.normalizedPath;
+  const entry = context.archive?.entriesByName.get(safePath);
   if (!entry) {
     invalid(
       context,
       path,
       "V2_ARCHIVE_IMAGE_MISSING",
-      `The archive does not contain '${normalizedPath}'.`,
+      `The archive does not contain '${safePath}'.`,
     );
     return undefined;
   }
   const image: ArchiveImageSourceIR = {
     kind: "archive",
-    entryName: normalizedPath,
+    entryName: safePath,
     ...(entry.bytes ? { bytes: entry.bytes } : {}),
   };
   return image;
@@ -2252,8 +2261,15 @@ function validateArchive(
     });
     return undefined;
   }
-  const projectEntry = normalizeSlashes(input.projectJsonEntryName);
-  if (!isSafeArchivePath(projectEntry) || projectEntry.includes("/") || !projectEntry.endsWith(".json")) {
+  const projectEntryValidation = validateZipEntryPath(input.projectJsonEntryName);
+  const projectEntry = projectEntryValidation.safe
+    ? projectEntryValidation.normalizedPath
+    : normalizeSlashes(input.projectJsonEntryName);
+  if (
+    !projectEntryValidation.safe ||
+    projectEntry.includes("/") ||
+    !projectEntry.toLocaleLowerCase("en-US").endsWith(".json")
+  ) {
     addDiagnostic(context, {
       code: "V2_PROJECT_JSON_PATH_UNSAFE",
       category: "security",
@@ -2267,8 +2283,14 @@ function validateArchive(
 
   const entries = new Map<string, V2ArchiveEntry>();
   const caseFolded = new Map<string, string>();
+  let totalEntryNameBytes = 0;
   for (const [index, rawEntry] of input.entries.entries()) {
-    if (exceedsUtf8ByteLimit(rawEntry.name, PROJECT_PATH_MAX_BYTES)) {
+    const entryNameBytes = new TextEncoder().encode(rawEntry.name).byteLength;
+    totalEntryNameBytes = Math.min(
+      BROWSER_ARCHIVE_LIMITS.maxTotalEntryNameBytes + 1,
+      totalEntryNameBytes + entryNameBytes,
+    );
+    if (entryNameBytes > PROJECT_PATH_MAX_BYTES) {
       addDiagnostic(context, {
         code: "V2_ARCHIVE_ENTRY_NAME_LIMIT_EXCEEDED",
         category: "security",
@@ -2280,10 +2302,10 @@ function validateArchive(
       });
       continue;
     }
-    const name = normalizeSlashes(rawEntry.name);
-    if (name.endsWith("/")) {
-      const directoryName = name.slice(0, -1);
-      if (!isSafeArchivePath(directoryName)) {
+    const slashName = normalizeSlashes(rawEntry.name);
+    if (slashName.endsWith("/")) {
+      const directoryName = slashName.slice(0, -1);
+      if (!validateZipEntryPath(directoryName).safe) {
         addDiagnostic(context, {
           code: "V2_ARCHIVE_ENTRY_UNSAFE",
           category: "security",
@@ -2291,12 +2313,13 @@ function validateArchive(
           disposition: "block",
           path: `$.archive.entries[${index}].name`,
           message: "Archive directory entries must be safe relative paths.",
-          details: { entryName: name },
+          details: { entryName: slashName },
         });
       }
       continue;
     }
-    if (!isSafeArchivePath(name)) {
+    const validation = validateZipEntryPath(slashName);
+    if (!validation.safe) {
       addDiagnostic(context, {
         code: "V2_ARCHIVE_ENTRY_UNSAFE",
         category: "security",
@@ -2304,11 +2327,12 @@ function validateArchive(
         disposition: "block",
         path: `$.archive.entries[${index}].name`,
         message: "Archive entries must be safe relative paths without traversal.",
-        details: { entryName: name },
+        details: { entryName: slashName, reason: validation.reason },
       });
       continue;
     }
-    const folded = name.toLocaleLowerCase();
+    const name = validation.normalizedPath;
+    const folded = zipEntryComparisonKey(name);
     if (caseFolded.has(folded)) {
       addDiagnostic(context, {
         code: "V2_ARCHIVE_ENTRY_DUPLICATE",
@@ -2323,6 +2347,17 @@ function validateArchive(
     }
     caseFolded.set(folded, name);
     entries.set(name, { ...rawEntry, name });
+  }
+  if (totalEntryNameBytes > BROWSER_ARCHIVE_LIMITS.maxTotalEntryNameBytes) {
+    addDiagnostic(context, {
+      code: "V2_ARCHIVE_ENTRY_NAMES_TOTAL_LIMIT_EXCEEDED",
+      category: "security",
+      severity: "error",
+      disposition: "block",
+      path: "$.archive.entries",
+      message: "Archive entry names exceed the safe cumulative UTF-8 byte limit.",
+      details: { maximum: BROWSER_ARCHIVE_LIMITS.maxTotalEntryNameBytes },
+    });
   }
 
   const rootJsonEntries = [...entries.keys()].filter(
@@ -3297,20 +3332,6 @@ function normalizeSlashes(path: string): string {
 
 function lastSegment(path: string): string {
   return path.split("/").filter(Boolean).at(-1) ?? "";
-}
-
-function isSafeArchivePath(path: string): boolean {
-  if (
-    !path ||
-    path.includes("\0") ||
-    path.startsWith("/") ||
-    /^[a-z]:\//i.test(path) ||
-    path.includes(":")
-  ) {
-    return false;
-  }
-  const segments = path.split("/");
-  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
 function hasTraversal(path: string): boolean {

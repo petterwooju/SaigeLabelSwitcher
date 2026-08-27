@@ -183,14 +183,21 @@ test("parser diagnostics apply only to the output targets named in their details
 });
 
 test("ProjectConverter uses the capability matrix for loading and rendering", async () => {
-  const source = await readFile(
-    new URL("../components/ProjectConverter.tsx", import.meta.url),
-    "utf8",
-  );
-  const saveService = await readFile(
-    new URL("../lib/output/conversionSave.ts", import.meta.url),
-    "utf8",
-  );
+  const [componentSource, copySource, saveService] = await Promise.all([
+    readFile(
+      new URL("../components/ProjectConverter.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../components/projectConverterCopy.ts", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../lib/output/conversionSave.ts", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  const source = `${componentSource}\n${copySource}`;
 
   assert.match(
     source,
@@ -235,6 +242,6 @@ test("ProjectConverter uses the capability matrix for loading and rendering", as
   );
   assert.match(
     saveService,
-    /target === "srproj"[\s\S]*?writeSrproj\(workingProject,[\s\S]*?allowConfirmedLoss,/,
+    /target === "srproj"[\s\S]*?writeSrprojAsync\([\s\S]*?workingProject,[\s\S]*?allowConfirmedLoss,/,
   );
 });

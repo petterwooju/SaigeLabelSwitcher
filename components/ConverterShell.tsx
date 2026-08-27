@@ -12,8 +12,19 @@ import "./converter.css";
 import type { ProjectSourceFormat } from "../lib/model/project.ts";
 import { APP_VERSION } from "../lib/release.ts";
 import type { ProjectOutputFormat } from "./projectCapabilities.ts";
+import {
+  clamp,
+  copy,
+  formatBytes,
+  formatInteger,
+  languageOptions,
+  languageTags,
+  safePercent,
+  type ConverterLanguage as CopyConverterLanguage,
+  type LocalizedCopy,
+} from "./converterShellCopy.ts";
 
-export type ConverterLanguage = "zh" | "en" | "ko";
+export type ConverterLanguage = CopyConverterLanguage;
 
 export type ConverterStatus =
   | "idle"
@@ -70,6 +81,14 @@ export interface ImageMatchIssue {
   readonly message?: string;
 }
 
+export interface ImageSourceBatchSummary {
+  readonly id: string;
+  readonly kind: "directory" | "files" | "zip";
+  readonly label: string;
+  readonly fileCount: number;
+  readonly totalBytes: number;
+}
+
 export interface ImageMatchSummary {
   readonly state: ImageMatchState;
   /** Whether selected images are packaged or only inspected for missing dimensions. */
@@ -82,7 +101,10 @@ export interface ImageMatchSummary {
   readonly directoryCount?: number;
   readonly hasSelectedSources?: boolean;
   readonly canSelectDirectory?: boolean;
+  /** Exact number of missing, ambiguous, or blank-path items, even when sampled. */
+  readonly issueCount?: number;
   readonly issues?: readonly ImageMatchIssue[];
+  readonly sourceBatches?: readonly ImageSourceBatchSummary[];
 }
 
 export interface ConverterDiagnostic {
@@ -145,336 +167,13 @@ export interface ConverterShellProps {
   readonly onSelectImageFiles: () => void;
   readonly onSelectImageZip: () => void;
   readonly onClearImageSources: () => void;
+  readonly onRemoveImageSource: (selectionId: string) => void;
   readonly onSave: () => void;
   readonly onCancel: () => void;
   readonly onReset: () => void;
   readonly onLanguageChange: (language: ConverterLanguage) => void;
   readonly onConfirmationChange: (checked: boolean) => void;
 }
-
-const copy = {
-  zh: {
-    title: "SaigeVision 项目转换",
-    subtitle: "在 V1 与 V2 之间转换 Classification 和 Segmentation 项目。",
-    privacy: "本地处理 · 不上传项目或图片",
-    languageLabel: "选择界面语言",
-    projectFile: "项目文件",
-    selectFile: "选择项目文件",
-    dropFile: "或拖放到这里",
-    supported: "支持 .srproj、SVPA.zip、.visionproj 和 .subvisionproj",
-    inspecting: "正在识别项目版本…",
-    identified: "已识别",
-    change: "更换",
-    projectName: "项目",
-    projectType: "类型",
-    images: "图片",
-    classes: "类别",
-    labels: "标注",
-    split: "数据划分",
-    outputHeading: "转换为",
-    recommended: "推荐",
-    imageHeading: "项目图片",
-    imageHelp: "完整项目需要读取全部原图。图片分散时可继续添加目录。",
-    imageHelpDimensions: "图片只用于读取缺失的宽高信息，不会打包进 .subvisionproj。",
-    sourceImagesReady: "图片已就绪",
-    sourceImagesReadyDetail: "已从源项目读取全部图片，无需另选目录。",
-    selectDirectory: "选择图片目录",
-    addDirectory: "继续添加目录",
-    selectImageFiles: "选择图片文件",
-    selectImageZip: "选择图片 ZIP",
-    clearImageSources: "清空已选图片来源",
-    imageSourceAlternatives: "当前浏览器无法读取文件夹时，可选择保留目录结构的图片 ZIP。仅当图片文件名不重复时，才适合直接多选图片文件。",
-    imageSourceGroupLabel: "添加项目图片",
-    matched: "已匹配",
-    missing: "缺失",
-    ambiguous: "重名",
-    matching: "正在查找项目图片…",
-    imagesIncomplete: "图片尚未全部唯一匹配，暂不能生成完整项目。",
-    imagesIncompleteDimensions: "需要为每个项目图片找到唯一文件，才能读取尺寸并生成 .subvisionproj。",
-    showRemaining: (count: number) => `查看其余 ${count} 项`,
-    diagnostics: "转换检查",
-    severityError: "错误：",
-    severityWarning: "警告：",
-    severityInfo: "信息：",
-    showMoreDiagnostics: (count: number) => `查看其余 ${count} 项`,
-    confirmationHeading: "需要确认",
-    confirmationDefault: "目标格式无法保留上方列出的部分源字段。",
-    confirmationLabel: "我已了解上述字段不会写入目标格式，并继续转换。",
-    sourceUnchanged: "源文件不会被修改。",
-    saving: "正在保存…",
-    cancel: "取消",
-    retry: "重试保存",
-    chooseSaveLocation: "选择保存位置并开始写入",
-    success: "转换完成",
-    successDirect: "项目文件已保存到你选择的位置。",
-    successDownload: "浏览器下载已开始，请在下载列表中查看。",
-    successFallback: "项目文件已生成。",
-    another: "转换另一个项目",
-    unsupported: `v${APP_VERSION} 仅支持 Classification 和多边形 Segmentation。`,
-    genericError: "转换未完成，源文件未被修改。",
-    fileInputLabel: "选择一个 SaigeVision 项目文件",
-    statusLabel: "转换状态",
-    progressLabel: "转换进度",
-    countUnit: "项",
-    formats: {
-      "v1-srproj": "SaigeVision V1 项目",
-      "v1-svpa": "SaigeVision V1 完整项目 ZIP",
-      "v2-visionproj": "SaigeVision V2 完整项目",
-      "v2-subvisionproj": "SaigeVision V2 轻量项目",
-    },
-    output: {
-      visionproj: {
-        title: "V2 完整项目",
-        description: "包含图片，适合迁移或交付。",
-        extension: ".visionproj",
-      },
-      subvisionproj: {
-        title: "V2 轻量项目",
-        description: "不包含图片；导入时原图片必须仍在原路径。",
-        extension: ".subvisionproj",
-      },
-      srproj: {
-        title: "V1 项目文件",
-        description: "仅项目与标注，不包含图片。",
-        extension: ".srproj",
-      },
-      "svpa-zip": {
-        title: "V1 完整项目 ZIP",
-        description: "包含 .srproj、图片和路径修复工具。",
-        extension: "SVPA.zip",
-      },
-    },
-    save: (extension: string) => `转换并保存 ${extension}`,
-    stages: {
-      inspecting: "正在识别项目版本…",
-      reading: "正在读取项目结构…",
-      matching: "正在查找项目图片…",
-      "choosing-save-location": "请选择保存位置…",
-      converting: "正在转换项目结构…",
-      "writing-images": "正在写入图片…",
-      finalizing: "正在完成项目文件…",
-    },
-  },
-  en: {
-    title: "SaigeVision Project Converter",
-    subtitle: "Convert Classification and Segmentation projects between SaigeVision V1 and V2.",
-    privacy: "Processed locally · Projects and images are never uploaded",
-    languageLabel: "Choose interface language",
-    projectFile: "Project file",
-    selectFile: "Choose project file",
-    dropFile: "or drop it here",
-    supported: "Supports .srproj, SVPA.zip, .visionproj and .subvisionproj",
-    inspecting: "Identifying the project version…",
-    identified: "Identified",
-    change: "Change",
-    projectName: "Project",
-    projectType: "Type",
-    images: "Images",
-    classes: "Classes",
-    labels: "Labels",
-    split: "Split",
-    outputHeading: "Convert to",
-    recommended: "Recommended",
-    imageHeading: "Project images",
-    imageHelp: "A complete project needs every original image. Add more folders if the images are spread across locations.",
-    imageHelpDimensions: "Images are used only to read missing dimensions and are not packaged in the .subvisionproj file.",
-    sourceImagesReady: "Images ready",
-    sourceImagesReadyDetail: "All images were read from the source project. No folder is needed.",
-    selectDirectory: "Choose image folder",
-    addDirectory: "Add another folder",
-    selectImageFiles: "Choose image files",
-    selectImageZip: "Choose image ZIP",
-    clearImageSources: "Clear selected image sources",
-    imageSourceAlternatives: "If this browser cannot read folders, choose an image ZIP that preserves the folder structure. Direct file selection is safe only when image filenames are unique.",
-    imageSourceGroupLabel: "Add project images",
-    matched: "Matched",
-    missing: "Missing",
-    ambiguous: "Duplicates",
-    matching: "Finding project images…",
-    imagesIncomplete: "Every image must have one unique match before a complete project can be created.",
-    imagesIncompleteDimensions: "Every project image needs one unique match before its dimensions can be read and the .subvisionproj file created.",
-    showRemaining: (count: number) => `Show ${count} more`,
-    diagnostics: "Conversion checks",
-    severityError: "Error: ",
-    severityWarning: "Warning: ",
-    severityInfo: "Information: ",
-    showMoreDiagnostics: (count: number) => `Show ${count} more`,
-    confirmationHeading: "Confirmation required",
-    confirmationDefault: "The target format cannot preserve some source fields listed above.",
-    confirmationLabel: "I understand that these fields will not be written to the target format and want to continue.",
-    sourceUnchanged: "The source file will not be changed.",
-    saving: "Saving…",
-    cancel: "Cancel",
-    retry: "Try saving again",
-    chooseSaveLocation: "Choose save location and start writing",
-    success: "Conversion complete",
-    successDirect: "The project file was saved to the location you chose.",
-    successDownload: "The browser download has started. Check your downloads list.",
-    successFallback: "The project file was created.",
-    another: "Convert another project",
-    unsupported: `v${APP_VERSION} supports only Classification and polygon Segmentation.`,
-    genericError: "Conversion did not finish. The source file was not changed.",
-    fileInputLabel: "Choose one SaigeVision project file",
-    statusLabel: "Conversion status",
-    progressLabel: "Conversion progress",
-    countUnit: "items",
-    formats: {
-      "v1-srproj": "SaigeVision V1 project",
-      "v1-svpa": "SaigeVision V1 complete project ZIP",
-      "v2-visionproj": "SaigeVision V2 complete project",
-      "v2-subvisionproj": "SaigeVision V2 lightweight project",
-    },
-    output: {
-      visionproj: {
-        title: "V2 complete project",
-        description: "Includes images for migration or delivery.",
-        extension: ".visionproj",
-      },
-      subvisionproj: {
-        title: "V2 lightweight project",
-        description: "Does not include images; the originals must remain at their paths when imported.",
-        extension: ".subvisionproj",
-      },
-      srproj: {
-        title: "V1 project file",
-        description: "Project and annotations only; images are not included.",
-        extension: ".srproj",
-      },
-      "svpa-zip": {
-        title: "V1 complete project ZIP",
-        description: "Includes the .srproj, images and path repair helper.",
-        extension: "SVPA.zip",
-      },
-    },
-    save: (extension: string) => `Convert and save ${extension}`,
-    stages: {
-      inspecting: "Identifying the project version…",
-      reading: "Reading the project structure…",
-      matching: "Finding project images…",
-      "choosing-save-location": "Choose where to save…",
-      converting: "Converting the project structure…",
-      "writing-images": "Writing images…",
-      finalizing: "Finishing the project file…",
-    },
-  },
-  ko: {
-    title: "SaigeVision 프로젝트 변환",
-    subtitle: "SaigeVision V1과 V2 사이에서 Classification 및 Segmentation 프로젝트를 변환합니다.",
-    privacy: "로컬 처리 · 프로젝트와 이미지를 업로드하지 않음",
-    languageLabel: "인터페이스 언어 선택",
-    projectFile: "프로젝트 파일",
-    selectFile: "프로젝트 파일 선택",
-    dropFile: "또는 여기에 끌어 놓기",
-    supported: ".srproj, SVPA.zip, .visionproj, .subvisionproj 지원",
-    inspecting: "프로젝트 버전을 확인하는 중…",
-    identified: "확인됨",
-    change: "변경",
-    projectName: "프로젝트",
-    projectType: "유형",
-    images: "이미지",
-    classes: "클래스",
-    labels: "라벨",
-    split: "데이터 분할",
-    outputHeading: "변환 형식",
-    recommended: "권장",
-    imageHeading: "프로젝트 이미지",
-    imageHelp: "전체 프로젝트에는 모든 원본 이미지가 필요합니다. 이미지가 여러 위치에 있으면 폴더를 추가하세요.",
-    imageHelpDimensions: "이미지는 누락된 크기 정보를 읽는 데만 사용되며 .subvisionproj 파일에 포함되지 않습니다.",
-    sourceImagesReady: "이미지 준비 완료",
-    sourceImagesReadyDetail: "원본 프로젝트에서 모든 이미지를 읽었습니다. 폴더를 다시 선택할 필요가 없습니다.",
-    selectDirectory: "이미지 폴더 선택",
-    addDirectory: "다른 폴더 추가",
-    selectImageFiles: "이미지 파일 선택",
-    selectImageZip: "이미지 ZIP 선택",
-    clearImageSources: "선택한 이미지 소스 지우기",
-    imageSourceAlternatives: "이 브라우저가 폴더를 읽지 못하면 폴더 구조를 유지한 이미지 ZIP을 선택하세요. 이미지 파일명이 모두 고유한 경우에만 파일을 직접 선택할 수 있습니다.",
-    imageSourceGroupLabel: "프로젝트 이미지 추가",
-    matched: "일치",
-    missing: "누락",
-    ambiguous: "중복",
-    matching: "프로젝트 이미지를 찾는 중…",
-    imagesIncomplete: "전체 프로젝트를 만들려면 모든 이미지가 하나의 파일과 정확히 일치해야 합니다.",
-    imagesIncompleteDimensions: "이미지 크기를 읽고 .subvisionproj 파일을 만들려면 각 프로젝트 이미지가 하나의 파일과 정확히 일치해야 합니다.",
-    showRemaining: (count: number) => `${count}개 더 보기`,
-    diagnostics: "변환 검사",
-    severityError: "오류: ",
-    severityWarning: "경고: ",
-    severityInfo: "정보: ",
-    showMoreDiagnostics: (count: number) => `${count}개 더 보기`,
-    confirmationHeading: "확인 필요",
-    confirmationDefault: "대상 형식은 위에 나열된 일부 원본 필드를 보존할 수 없습니다.",
-    confirmationLabel: "위 필드가 대상 형식에 기록되지 않음을 이해했으며 변환을 계속합니다.",
-    sourceUnchanged: "원본 파일은 변경되지 않습니다.",
-    saving: "저장 중…",
-    cancel: "취소",
-    retry: "저장 다시 시도",
-    chooseSaveLocation: "저장 위치를 선택하고 쓰기 시작",
-    success: "변환 완료",
-    successDirect: "선택한 위치에 프로젝트 파일을 저장했습니다.",
-    successDownload: "브라우저 다운로드를 시작했습니다. 다운로드 목록을 확인하세요.",
-    successFallback: "프로젝트 파일을 만들었습니다.",
-    another: "다른 프로젝트 변환",
-    unsupported: `v${APP_VERSION}은 Classification 및 다각형 Segmentation만 지원합니다.`,
-    genericError: "변환이 완료되지 않았습니다. 원본 파일은 변경되지 않았습니다.",
-    fileInputLabel: "SaigeVision 프로젝트 파일 하나 선택",
-    statusLabel: "변환 상태",
-    progressLabel: "변환 진행률",
-    countUnit: "개",
-    formats: {
-      "v1-srproj": "SaigeVision V1 프로젝트",
-      "v1-svpa": "SaigeVision V1 전체 프로젝트 ZIP",
-      "v2-visionproj": "SaigeVision V2 전체 프로젝트",
-      "v2-subvisionproj": "SaigeVision V2 경량 프로젝트",
-    },
-    output: {
-      visionproj: {
-        title: "V2 전체 프로젝트",
-        description: "이미지를 포함하여 이전 또는 전달에 적합합니다.",
-        extension: ".visionproj",
-      },
-      subvisionproj: {
-        title: "V2 경량 프로젝트",
-        description: "이미지를 포함하지 않습니다. 가져올 때 원본 이미지가 기존 경로에 있어야 합니다.",
-        extension: ".subvisionproj",
-      },
-      srproj: {
-        title: "V1 프로젝트 파일",
-        description: "프로젝트와 라벨만 포함하며 이미지는 포함하지 않습니다.",
-        extension: ".srproj",
-      },
-      "svpa-zip": {
-        title: "V1 전체 프로젝트 ZIP",
-        description: ".srproj, 이미지 및 경로 복구 도구를 포함합니다.",
-        extension: "SVPA.zip",
-      },
-    },
-    save: (extension: string) => `변환 후 ${extension} 저장`,
-    stages: {
-      inspecting: "프로젝트 버전을 확인하는 중…",
-      reading: "프로젝트 구조를 읽는 중…",
-      matching: "프로젝트 이미지를 찾는 중…",
-      "choosing-save-location": "저장 위치를 선택하세요…",
-      converting: "프로젝트 구조를 변환하는 중…",
-      "writing-images": "이미지를 쓰는 중…",
-      finalizing: "프로젝트 파일을 마무리하는 중…",
-    },
-  },
-} satisfies Record<ConverterLanguage, object>;
-
-const languageTags: Record<ConverterLanguage, string> = {
-  zh: "zh-CN",
-  en: "en",
-  ko: "ko",
-};
-
-const languageOptions: readonly {
-  language: ConverterLanguage;
-  label: string;
-}[] = [
-  { language: "zh", label: "中文" },
-  { language: "en", label: "EN" },
-  { language: "ko", label: "한국어" },
-];
 
 const MAX_VISIBLE_ITEMS = 3;
 
@@ -497,6 +196,7 @@ export function ConverterShell({
   onSelectImageFiles,
   onSelectImageZip,
   onClearImageSources,
+  onRemoveImageSource,
   onSave,
   onCancel,
   onReset,
@@ -667,6 +367,7 @@ export function ConverterShell({
                   onSelectImageFiles={onSelectImageFiles}
                   onSelectImageZip={onSelectImageZip}
                   onClearImageSources={onClearImageSources}
+                  onRemoveImageSource={onRemoveImageSource}
                 />
               ) : null}
 
@@ -742,16 +443,15 @@ export function ConverterShell({
             </>
           ) : null}
         </section>
+        <footer className="converter-shell__legal">
+          <a href="/THIRD_PARTY_NOTICES.md" target="_blank" rel="noreferrer">
+            {text.thirdPartyNotices}
+          </a>
+        </footer>
       </div>
     </main>
   );
 }
-
-interface CopyShape {
-  readonly [key: string]: unknown;
-}
-
-type LocalizedCopy = (typeof copy)[ConverterLanguage] & CopyShape;
 
 function EmptyState({
   inputId,
@@ -978,12 +678,16 @@ function OutputSection({
   onTargetChange: (targetId: ConverterOutputFormat) => void;
 }) {
   return (
-    <fieldset className="converter-section converter-output">
+    <fieldset className="converter-section converter-output" aria-live="polite">
       <legend>{text.outputHeading}</legend>
       <div className="converter-output__grid">
         {outputs.map((option) => {
           const format = text.output[option.format];
           const optionDisabled = disabled || option.disabled;
+          const descriptionId = `${name}-${option.id}-description`;
+          const reasonId = option.disabledReason
+            ? `${name}-${option.id}-disabled-reason`
+            : undefined;
           return (
             <label
               className="converter-output-option"
@@ -997,6 +701,7 @@ function OutputSection({
                 value={option.id}
                 checked={option.selected}
                 disabled={optionDisabled}
+                aria-describedby={[descriptionId, reasonId].filter(Boolean).join(" ")}
                 onChange={() => onTargetChange(option.id)}
               />
               <span className="converter-output-option__body">
@@ -1007,9 +712,13 @@ function OutputSection({
                   ) : null}
                 </span>
                 <code>{format.extension}</code>
-                <span>{option.description ?? format.description}</span>
+                <span id={descriptionId}>{option.description ?? format.description}</span>
                 {option.disabledReason ? (
-                  <small className="converter-output-option__reason">
+                  <small
+                    className="converter-output-option__reason"
+                    id={reasonId}
+                    role="note"
+                  >
                     {option.disabledReason}
                   </small>
                 ) : null}
@@ -1031,6 +740,7 @@ function ImageSection({
   onSelectImageFiles,
   onSelectImageZip,
   onClearImageSources,
+  onRemoveImageSource,
 }: {
   summary: ImageMatchSummary;
   text: LocalizedCopy;
@@ -1040,12 +750,14 @@ function ImageSection({
   onSelectImageFiles: () => void;
   onSelectImageZip: () => void;
   onClearImageSources: () => void;
+  onRemoveImageSource: (selectionId: string) => void;
 }) {
   const headingId = useId();
   const isSourceReady = summary.state === "source-ready";
   const isMatching = summary.state === "matching";
   const dimensionsOnly = summary.purpose === "dimensions";
-  const issueCount = summary.issues?.length ?? 0;
+  const retainedIssueCount = summary.issues?.length ?? 0;
+  const issueCount = summary.issueCount ?? retainedIssueCount;
   const visibleIssues = summary.issues?.slice(0, MAX_VISIBLE_ITEMS) ?? [];
   const remainingIssues = summary.issues?.slice(MAX_VISIBLE_ITEMS) ?? [];
   const percent = safePercent(summary.matchedCount, summary.totalCount);
@@ -1146,6 +858,41 @@ function ImageSection({
         </>
       ) : null}
 
+      {summary.sourceBatches?.length ? (
+        <div className="converter-image-sources">
+          <h3>{text.selectedImageSources}</h3>
+          <ul>
+            {summary.sourceBatches.map((batch) => (
+              <li key={batch.id}>
+                <span className="converter-image-sources__identity">
+                  <strong title={batch.label}>{batch.label}</strong>
+                  <small>
+                    {batch.kind === "directory"
+                      ? text.sourceKindDirectory
+                      : batch.kind === "zip"
+                        ? text.sourceKindZip
+                        : text.sourceKindFiles}
+                    {" · "}
+                    {text.sourceFileCount(batch.fileCount)}
+                    {" · "}
+                    {formatBytes(batch.totalBytes, language)}
+                  </small>
+                </span>
+                <button
+                  className="converter-button converter-button--quiet converter-image-sources__remove"
+                  type="button"
+                  aria-label={text.removeImageSource(batch.label)}
+                  disabled={disabled || isMatching}
+                  onClick={() => onRemoveImageSource(batch.id)}
+                >
+                  {text.remove}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {issueCount > 0 ? (
         <div className="converter-issues">
           <ul>
@@ -1162,6 +909,11 @@ function ImageSection({
                 ))}
               </ul>
             </details>
+          ) : null}
+          {issueCount > retainedIssueCount ? (
+            <p className="converter-issues__limit" role="status">
+              {text.issueSampleLimit(retainedIssueCount, issueCount)}
+            </p>
           ) : null}
         </div>
       ) : null}
@@ -1276,6 +1028,8 @@ function ConfirmationSection({
     <section
       className="converter-section converter-confirmation"
       aria-labelledby={`${inputId}-heading`}
+      aria-describedby={`${inputId}-description`}
+      aria-live="polite"
     >
       <h2 id={`${inputId}-heading`}>{text.confirmationHeading}</h2>
       <p id={`${inputId}-description`}>
@@ -1407,30 +1161,4 @@ function progressValueText(
     return `${Math.round(clamp(progress.percent, 0, 100))}%`;
   }
   return "";
-}
-
-function formatInteger(value: number, language: ConverterLanguage): string {
-  return new Intl.NumberFormat(languageTags[language], { maximumFractionDigits: 0 }).format(value);
-}
-
-function formatBytes(bytes: number, language: ConverterLanguage): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const index = Math.min(
-    Math.max(Math.floor(Math.log(bytes) / Math.log(1024)), 0),
-    units.length - 1,
-  );
-  const value = bytes / 1024 ** index;
-  return `${new Intl.NumberFormat(languageTags[language], {
-    maximumFractionDigits: value >= 10 || index === 0 ? 0 : 1,
-  }).format(value)} ${units[index]}`;
-}
-
-function safePercent(current: number, total: number): number {
-  if (!Number.isFinite(current) || !Number.isFinite(total) || total <= 0) return 0;
-  return clamp((current / total) * 100, 0, 100);
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(Math.max(value, minimum), maximum);
 }

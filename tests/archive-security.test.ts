@@ -12,6 +12,7 @@ import {
   canonicalArchiveName,
   openValidatedZip,
 } from "../lib/archive/zip.ts";
+import { ARCHIVE_ENTRY_SEGMENT_MAX_BYTES } from "../lib/security/resourceLimits.ts";
 
 async function makeZip(entries: Array<[string, string]>): Promise<Blob> {
   const sink = new BlobWriter("application/zip");
@@ -74,10 +75,36 @@ test("equivalent archive paths collide case-insensitively", async () => {
 });
 
 test("unsafe entry paths are rejected", () => {
-  for (const name of ["../secret", "images/../secret", "/absolute", "C:/drive/file"]) {
+  for (const name of [
+    "../secret",
+    "images/../secret",
+    "/absolute",
+    "C:/drive/file",
+    "images/CON.png",
+    "images/CON .png",
+    "images/trailing. ",
+    "images/bad\nname.png",
+    `images/${"a".repeat(ARCHIVE_ENTRY_SEGMENT_MAX_BYTES + 1)}.png`,
+  ]) {
     assert.throws(() => assertSafeArchiveEntryName(name), ArchiveValidationError);
   }
   assert.doesNotThrow(() => assertSafeArchiveEntryName("图像/class/001.png"));
+});
+
+test("validated archive applies the same portable path rules to real entries", async () => {
+  for (const name of ["images/CON.png", "images/trailing."]) {
+    const source = await makeZip([[name, "unsafe"]]);
+    await assert.rejects(openValidatedZip(source), ArchiveValidationError);
+  }
+});
+
+test("archive opening honors an AbortSignal before central-directory parsing", async () => {
+  const source = await makeZip([["project.json", "{}"]]);
+  const controller = new AbortController();
+  controller.abort(new DOMException("cancelled", "AbortError"));
+  await assert.rejects(openValidatedZip(source, {}, controller.signal), {
+    name: "AbortError",
+  });
 });
 
 test("canonical names normalize slash, unicode and case", () => {

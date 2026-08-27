@@ -5,12 +5,18 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 async function readUiSources() {
-  const [converter, shell, saveService] = await Promise.all([
+  const [converterComponent, converterCopy, shellComponent, shellCopy, saveService] = await Promise.all([
     readFile(new URL("components/ProjectConverter.tsx", root), "utf8"),
+    readFile(new URL("components/projectConverterCopy.ts", root), "utf8"),
     readFile(new URL("components/ConverterShell.tsx", root), "utf8"),
+    readFile(new URL("components/converterShellCopy.ts", root), "utf8"),
     readFile(new URL("lib/output/conversionSave.ts", root), "utf8"),
   ]);
-  return { converter, shell, saveService };
+  return {
+    converter: `${converterComponent}\n${converterCopy}`,
+    shell: `${shellComponent}\n${shellCopy}`,
+    saveService,
+  };
 }
 
 test("filters compatibility diagnostics for the selected target version", async () => {
@@ -93,7 +99,7 @@ test("cancels every long operation and clears selected image sources safely", as
   assert.match(converter, /activeOperationRef\.current\?\.controller\.abort\(\)/);
   assert.match(converter, /selectedImageArchivesRef\.current = new Map\(\)/);
   assert.match(converter, /setSelectedFiles\(\[\]\)/);
-  assert.match(converter, /setDirectoryCount\(0\)/);
+  assert.match(converter, /selectedSourceBatchesRef\.current = \[\]/);
   assert.match(shell, /onClick=\{onCancel\}/);
   assert.equal((shell.match(/cancel:/g) ?? []).length, 3);
   assert.equal((shell.match(/clearImageSources:/g) ?? []).length, 3);
@@ -167,8 +173,9 @@ test("separates blocking conversion failures from retryable source and I/O error
   );
   assert.match(
     converter,
-    /return \{ severity: "error", code, blocking: false, retryable: true \}/u,
+    /error instanceof SrprojWriteError[\s\S]*?error instanceof ContainerWriteError/u,
   );
+  assert.match(converter, /blocking: deterministic,[\s\S]*?retryable: !deterministic/u);
 });
 
 test("uses per-instance heading ids and focuses meaningful state transitions", async () => {
@@ -180,4 +187,27 @@ test("uses per-instance heading ids and focuses meaningful state transitions", a
   assert.match(shell, /diagnosticHeadingRef\.current/);
   assert.match(shell, /successHeadingRef\.current/);
   assert.match(shell, /tabIndex=\{-1\}/);
+});
+
+test("keeps large image issue rendering bounded and exposes removable source batches", async () => {
+  const { converter, shell } = await readUiSources();
+
+  assert.match(converter, /retainImageMatchIssues\(current\)/);
+  assert.match(converter, /summarizeImageSourceBatches\(selectedFiles, selectedSourceBatches\)/);
+  assert.match(converter, /removeSelectedSourceBatch\(previous, selectionId\)/);
+  assert.match(converter, /void archive\.close\(\)\.catch/);
+  assert.match(converter, /recoverAfterImageSourceChange\(\)/);
+  assert.match(shell, /summary\.issueCount \?\? retainedIssueCount/);
+  assert.match(shell, /issueSampleLimit\(retainedIssueCount, issueCount\)/);
+  assert.match(shell, /onRemoveImageSource\(batch\.id\)/);
+});
+
+test("describes target choices, disabled reasons, and confirmations to assistive technology", async () => {
+  const { shell } = await readUiSources();
+
+  assert.match(shell, /aria-describedby=\{\[descriptionId, reasonId\]/);
+  assert.match(shell, /id=\{reasonId\}[\s\S]*?role="note"/);
+  assert.match(shell, /converter-output" aria-live="polite"/);
+  assert.match(shell, /converter-confirmation"[\s\S]*?aria-describedby=/);
+  assert.match(shell, /converter-confirmation"[\s\S]*?aria-live="polite"/);
 });

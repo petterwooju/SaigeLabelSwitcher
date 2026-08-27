@@ -19,11 +19,11 @@ import {
   type SaveDestination,
   type SaveResult,
 } from "./save.ts";
-import { writeSrproj } from "./srproj.ts";
 import {
-  writeV2SubvisionProject,
-  writeV2VisionProject,
-} from "./v2.ts";
+  writeSrprojAsync,
+  writeV2SubvisionProjectAsync,
+  writeV2VisionProjectAsync,
+} from "./writeProjectAsync.ts";
 
 export type ConversionSaveTarget =
   | "visionproj"
@@ -103,10 +103,14 @@ export async function prepareConversionOutput({
 }: PrepareConversionOutputOptions): Promise<PreparedConversionOutput> {
   throwIfAborted(signal);
   if (target === "subvisionproj") {
-    const result = writeV2SubvisionProject(workingProject, {
-      externalPaths: externalPathsForProject(originalProject),
-      allowConfirmedLoss,
-    });
+    const result = await writeV2SubvisionProjectAsync(
+      workingProject,
+      {
+        externalPaths: externalPathsForProject(originalProject),
+        allowConfirmedLoss,
+      },
+      signal,
+    );
     if (!result.ok) throw new WriterDiagnosticsError(result.diagnostics);
     const blob = new Blob([result.jsonText], {
       type: "application/json;charset=utf-8",
@@ -115,10 +119,14 @@ export async function prepareConversionOutput({
   }
 
   if (target === "visionproj") {
-    const result = writeV2VisionProject(workingProject, {
-      allowConfirmedLoss,
-      imageOutputPaths,
-    });
+    const result = await writeV2VisionProjectAsync(
+      workingProject,
+      {
+        allowConfirmedLoss,
+        imageOutputPaths,
+      },
+      signal,
+    );
     if (!result.ok) throw new WriterDiagnosticsError(result.diagnostics);
     if (!images) throw new Error("Project images are required for a complete V2 project.");
     const archive = prepareVisionArchive({ built: result, images });
@@ -131,10 +139,19 @@ export async function prepareConversionOutput({
   }
 
   if (target === "srproj") {
-    const xml = writeSrproj(workingProject, {
-      pathForFile: (file) => unquotePath(file.sourcePath),
-      allowConfirmedLoss,
-    });
+    const xml = await writeSrprojAsync(
+      workingProject,
+      {
+        pathByFileIndex: Object.fromEntries(
+          workingProject.files.map((file) => [
+            file.index,
+            unquotePath(file.sourcePath),
+          ]),
+        ),
+        allowConfirmedLoss,
+      },
+      signal,
+    );
     const blob = new Blob([xml], { type: "application/xml;charset=utf-8" });
     return { kind: "text", fileName, blob, estimatedBytes: blob.size };
   }
@@ -143,10 +160,16 @@ export async function prepareConversionOutput({
   const srprojXml =
     sourceFormat === "v1-srproj" && sourceProjectXmlText
       ? sourceProjectXmlText
-      : writeSrproj(workingProject, {
-          pathForFile: (file) => file.sourcePath,
-          allowConfirmedLoss,
-        });
+      : await writeSrprojAsync(
+          workingProject,
+          {
+            pathByFileIndex: Object.fromEntries(
+              workingProject.files.map((file) => [file.index, file.sourcePath]),
+            ),
+            allowConfirmedLoss,
+          },
+          signal,
+        );
   const archive = await prepareSvpaArchive({
     project: workingProject,
     srprojXml,

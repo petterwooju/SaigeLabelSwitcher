@@ -1,6 +1,6 @@
 # SaigeVision 项目双向转换器 — 实施与验收计划
 
-> v0.0.2 发布范围（2026-08-21）：Classification 与多边形 Segmentation 的四格式解析、双向 Writer、流式容器、安全门禁和单页 UI 已完成。Segmentation 已用真实 V1 contour 样本、原生 V2 `.visionproj/.subvisionproj` 对照包及生成项目 round-trip 验证；No ROI 与 Simple Rectangle ROI 已完成字段级双向映射，生成的 V2 编辑态 `roiShape` 也已通过目标版本的打开、显示与重新保存实机验收。Detection 及其他类型继续保持阻断，留待后续版本。
+> v0.0.3 发布范围（2026-08-27）：Classification 与多边形 Segmentation 的四格式解析、双向 Writer、流式容器、安全门禁和单页 UI 已完成。Segmentation 已用真实 V1 contour 样本、原生 V2 `.visionproj/.subvisionproj` 对照包及生成项目 round-trip 验证；No ROI 与 Simple Rectangle ROI 已完成字段级双向映射，生成的 V2 编辑态 `roiShape` 也已通过目标版本的打开、显示与重新保存实机验收。Detection 及其他类型继续保持阻断，留待后续版本。
 
 ## 建议代码结构
 

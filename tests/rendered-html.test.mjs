@@ -19,9 +19,12 @@ test("server-renders the SaigeVision converter shell", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
+  const packageJson = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf8"),
+  );
   assert.match(html, /<title>SaigeVision 项目转换<\/title>/i);
   assert.match(html, /SaigeVision Project Converter/);
-  assert.match(html, /v0\.0\.2/);
+  assert.match(html, new RegExp(`v${packageJson.version.replaceAll(".", "\\.")}`));
   assert.match(html, /Classification/);
   assert.match(html, /Segmentation/);
   assert.match(

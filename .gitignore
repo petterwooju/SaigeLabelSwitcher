@@ -13,6 +13,8 @@
 # testing
 /coverage
 /playwright-report/
+/public/THIRD_PARTY_NOTICES.md
+/public/workers/
 /test-results/
 
 # next.js
