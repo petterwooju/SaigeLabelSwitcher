@@ -11,6 +11,7 @@ import {
   projectImagePaths,
   resolveProjectImages,
 } from "../lib/files/resolveImages.ts";
+import { verifyAndEnrichProjectImages } from "../lib/files/imageDimensions.ts";
 import { loadProject, type LoadedProject } from "../lib/input/loadProject.ts";
 import { parseV1Srproj } from "../lib/input/v1.ts";
 import { parseV2SubvisionProject } from "../lib/input/v2.ts";
@@ -78,6 +79,16 @@ function browserFile(parts: BlobPart[], name: string): File {
     parts as unknown as ConstructorParameters<typeof NodeFile>[0],
     name,
   ) as unknown as File;
+}
+
+function jpeg(width: number, height: number): Uint8Array {
+  return new Uint8Array([
+    0xff, 0xd8,
+    0xff, 0xe0, 0x00, 0x04, 0x00, 0x00,
+    0xff, 0xc0, 0x00, 0x07, 0x08,
+    (height >> 8) & 0xff, height & 0xff,
+    (width >> 8) & 0xff, width & 0xff,
+  ]);
 }
 
 function parseFixture(): ProjectIR {
@@ -149,6 +160,70 @@ async function buildAndLoadVision(source: ProjectIR): Promise<LoadedProject> {
   return loadProject(browserFile([handle.blob()], built.fileName));
 }
 
+async function assertBlobMismatchRepairsToSvpa(
+  source: ProjectIR,
+  outputName: string,
+): Promise<void> {
+  const bytes = jpeg(12, 9);
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const file = source.files[0]!;
+  const verified = await verifyAndEnrichProjectImages(
+    source,
+    [{
+      fileIndex: file.index,
+      originalPath: file.sourcePath,
+      source: {
+        kind: "blob",
+        blob: new Blob([copy.buffer], { type: "image/bmp" }),
+        relativePath: "selected/source/108.bmp",
+      },
+    }],
+    { repairMismatchedExtensions: true },
+  );
+  assert.equal(verified.complete, true);
+  assert.equal(
+    verified.extensionRepairs[0]?.outputRelativePath,
+    "selected/source/108.jpg",
+  );
+  const srprojXml = writeSrproj(verified.project, {
+    allowConfirmedLoss: true,
+  });
+  assert.match(srprojXml, /<Path>[^<]*108\.bmp<\/Path>/u);
+  const handle = new MemorySaveHandle();
+  await writeSvpaArchive({
+    destination: { fileName: outputName, handle },
+    project: verified.project,
+    srprojXml,
+    images: verified.resolvedImages,
+    helper: new Blob([new Uint8Array([0x4d, 0x5a])]),
+  });
+  const loaded = await loadProject(browserFile([handle.blob()], outputName));
+  try {
+    assert.equal(loaded.format, "v1-svpa");
+    assert.ok(loaded.project);
+    assert.ok(loaded.archive);
+    assert.match(loaded.svpaManifest?.Entries[0]?.OriginalPath ?? "", /108\.bmp$/u);
+    assert.match(loaded.svpaManifest?.Entries[0]?.RelativePath ?? "", /108\.jpg$/u);
+    const image = loaded.project.files[0]?.image;
+    assert.equal(image?.kind, "archive");
+    if (image?.kind !== "archive") return;
+    assert.deepEqual(
+      new Uint8Array(await (await loaded.archive.readBlob(image.entryName)).arrayBuffer()),
+      bytes,
+    );
+    const resolved = resolveProjectImages(loaded.project, loaded.archive);
+    const reverified = await verifyAndEnrichProjectImages(
+      loaded.project,
+      resolved.images,
+    );
+    assert.equal(reverified.complete, true);
+    assert.deepEqual(reverified.issues, []);
+  } finally {
+    await loaded.close();
+  }
+}
+
 test("V1 srproj -> V2 subvision -> V2 parser preserves Classification semantics", () => {
   const source = parseFixture();
   const written = writeV2SubvisionProject(source);
@@ -201,6 +276,213 @@ test("V1 srproj + selected images -> vision container -> loadProject", async () 
     );
   } finally {
     await loaded.close();
+  }
+});
+
+test("V1 srproj -> vision repairs a verified image extension without re-encoding", async () => {
+  const fixture = parseFixture();
+  const originalPath = String.raw`C:\source\108.bmp`;
+  const source: ProjectIR = {
+    ...fixture,
+    files: [{
+      ...fixture.files[0]!,
+      sourcePath: originalPath,
+      normalizedPath: "C:/source/108.bmp",
+      fileName: "108.bmp",
+      width: 12,
+      height: 9,
+      image: { kind: "external", path: originalPath },
+    }],
+  };
+  const bytes = jpeg(12, 9);
+  const blobBytes = new Uint8Array(bytes.byteLength);
+  blobBytes.set(bytes);
+  const selected: ResolvedProjectImage[] = [{
+    fileIndex: source.files[0]!.index,
+    originalPath,
+    source: {
+      kind: "blob",
+      blob: new Blob([blobBytes.buffer], { type: "image/bmp" }),
+      relativePath: "selected/source/108.bmp",
+    },
+  }];
+  const verified = await verifyAndEnrichProjectImages(source, selected, {
+    repairMismatchedExtensions: true,
+  });
+  assert.equal(verified.complete, true);
+  assert.deepEqual(verified.extensionRepairs.map((item) => item.outputRelativePath), [
+    "selected/source/108.jpg",
+  ]);
+
+  const built = writeV2VisionProject(verified.project, {
+    imageOutputPaths: Object.fromEntries(
+      verified.extensionRepairs.map((item) => [item.fileIndex, item.outputRelativePath]),
+    ),
+  });
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  assert.equal(built.imageEntries[0]?.entryName, "images/selected/source/108.jpg");
+  assert.equal(built.imageEntries[0]?.source, source.files[0]?.image);
+
+  const handle = new MemorySaveHandle();
+  await writeVisionArchive({
+    destination: { fileName: built.fileName, handle },
+    built,
+    images: verified.resolvedImages,
+  });
+  const loaded = await loadProject(browserFile([handle.blob()], built.fileName));
+  try {
+    assert.equal(loaded.format, "v2-visionproj");
+    assert.ok(loaded.project);
+    assert.ok(loaded.archive);
+    assert.equal(loaded.project.files[0]?.sourcePath, "images/selected/source/108.jpg");
+    const resolved = resolveProjectImages(loaded.project, loaded.archive);
+    const reverified = await verifyAndEnrichProjectImages(
+      loaded.project,
+      resolved.images,
+    );
+    assert.equal(reverified.complete, true);
+    assert.deepEqual(reverified.issues, []);
+    const image = loaded.project.files[0]?.image;
+    assert.equal(image?.kind, "archive");
+    if (image?.kind !== "archive") return;
+    assert.deepEqual(
+      new Uint8Array(await (await loaded.archive.readBlob(image.entryName)).arrayBuffer()),
+      bytes,
+    );
+  } finally {
+    await loaded.close();
+  }
+});
+
+test("V1 srproj and V2 subvision repair mismatched extensions in SVPA output", async () => {
+  const fixture = parseFixture();
+  const originalPath = String.raw`C:\source\108.bmp`;
+  const v1Source: ProjectIR = {
+    ...fixture,
+    files: [{
+      ...fixture.files[0]!,
+      sourcePath: originalPath,
+      normalizedPath: "C:/source/108.bmp",
+      fileName: "108.bmp",
+      width: 12,
+      height: 9,
+      image: { kind: "external", path: originalPath },
+    }],
+  };
+  await assertBlobMismatchRepairsToSvpa(v1Source, "from-v1.svpa.zip");
+
+  const written = writeV2SubvisionProject(v1Source, {
+    allowConfirmedLoss: true,
+  });
+  assert.equal(written.ok, true);
+  if (!written.ok) return;
+  const subvision = await loadProject(
+    browserFile([written.jsonText], written.fileName),
+  );
+  try {
+    assert.equal(subvision.format, "v2-subvisionproj");
+    assert.ok(subvision.project);
+    await assertBlobMismatchRepairsToSvpa(
+      subvision.project,
+      "from-subvision.svpa.zip",
+    );
+  } finally {
+    await subvision.close();
+  }
+});
+
+test("V1 SVPA -> vision repairs an archive image extension and remains readable", async () => {
+  const fixture = parseFixture();
+  const originalPath = String.raw`C:\source\108.bmp`;
+  const source: ProjectIR = {
+    ...fixture,
+    files: [{
+      ...fixture.files[0]!,
+      sourcePath: originalPath,
+      normalizedPath: "C:/source/108.bmp",
+      fileName: "108.bmp",
+      width: 12,
+      height: 9,
+      image: { kind: "external", path: originalPath },
+    }],
+  };
+  const bytes = jpeg(12, 9);
+  const byteCopy = new Uint8Array(bytes.byteLength);
+  byteCopy.set(bytes);
+  const srprojXml = writeSrproj(source, { allowConfirmedLoss: true });
+  const svpaHandle = new MemorySaveHandle();
+  await writeSvpaArchive({
+    destination: { fileName: "source.svpa.zip", handle: svpaHandle },
+    project: source,
+    srprojXml,
+    images: [{
+      fileIndex: source.files[0]!.index,
+      originalPath,
+      source: {
+        kind: "blob",
+        blob: new Blob([byteCopy.buffer], { type: "image/bmp" }),
+        relativePath: "source/108.bmp",
+      },
+    }],
+    helper: new Blob([new Uint8Array([0x4d, 0x5a])]),
+  });
+
+  const svpa = await loadProject(
+    browserFile([svpaHandle.blob()], "source.svpa.zip"),
+  );
+  try {
+    assert.equal(svpa.format, "v1-svpa");
+    assert.ok(svpa.project);
+    assert.ok(svpa.archive);
+    const resolved = resolveProjectImages(svpa.project, svpa.archive);
+    assert.equal(resolved.complete, true);
+    assert.match(resolved.images[0]?.source.relativePath ?? "", /108\.bmp$/u);
+    const verified = await verifyAndEnrichProjectImages(
+      svpa.project,
+      resolved.images,
+      { repairMismatchedExtensions: true },
+    );
+    assert.equal(verified.complete, true);
+    assert.equal(verified.extensionRepairs[0]?.outputRelativePath, "source/108.jpg");
+    const built = writeV2VisionProject(verified.project, {
+      allowConfirmedLoss: true,
+      imageOutputPaths: Object.fromEntries(
+        verified.extensionRepairs.map((item) => [
+          item.fileIndex,
+          item.outputRelativePath,
+        ]),
+      ),
+    });
+    assert.equal(built.ok, true);
+    if (!built.ok) return;
+    assert.equal(built.imageEntries[0]?.entryName, "images/source/108.jpg");
+    const visionHandle = new MemorySaveHandle();
+    await writeVisionArchive({
+      destination: { fileName: built.fileName, handle: visionHandle },
+      built,
+      images: verified.resolvedImages,
+    });
+    const vision = await loadProject(
+      browserFile([visionHandle.blob()], built.fileName),
+    );
+    try {
+      assert.equal(vision.format, "v2-visionproj");
+      assert.ok(vision.project);
+      assert.ok(vision.archive);
+      assert.equal(vision.project.files[0]?.sourcePath, "images/source/108.jpg");
+      const reResolved = resolveProjectImages(vision.project, vision.archive);
+      const reverified = await verifyAndEnrichProjectImages(
+        vision.project,
+        reResolved.images,
+      );
+      assert.equal(reverified.complete, true);
+      assert.deepEqual(reverified.issues, []);
+    } finally {
+      await vision.close();
+    }
+  } finally {
+    await svpa.close();
   }
 });
 
@@ -260,6 +542,149 @@ test("V2 vision -> SVPA -> loadProject yields V1 archive-backed IR", async () =>
       );
     } finally {
       await v1.close();
+    }
+  } finally {
+    await vision.close();
+  }
+});
+
+test("V2 vision -> SVPA repairs a verified JPEG stored with a BMP name", async () => {
+  const fixture = parseFixture();
+  const originalPath = String.raw`C:\source\108.bmp`;
+  const source: ProjectIR = {
+    ...fixture,
+    files: [{
+      ...fixture.files[0]!,
+      sourcePath: originalPath,
+      normalizedPath: "C:/source/108.bmp",
+      fileName: "108.bmp",
+      width: 514,
+      height: 1306,
+      image: { kind: "external", path: originalPath },
+    }],
+  };
+  const bytes = jpeg(514, 1306);
+  const blobBytes = new Uint8Array(bytes.byteLength);
+  blobBytes.set(bytes);
+  const built = writeV2VisionProject(source, { allowConfirmedLoss: true });
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  const visionHandle = new MemorySaveHandle();
+  await writeVisionArchive({
+    destination: { fileName: built.fileName, handle: visionHandle },
+    built,
+    images: [{
+      fileIndex: source.files[0]!.index,
+      originalPath,
+      source: {
+        kind: "blob",
+        blob: new Blob([blobBytes.buffer], { type: "image/bmp" }),
+        relativePath: "source/108.bmp",
+      },
+    }],
+  });
+  const vision = await loadProject(browserFile([visionHandle.blob()], built.fileName));
+  try {
+    assert.equal(vision.format, "v2-visionproj");
+    assert.ok(vision.project);
+    assert.ok(vision.archive);
+    const embedded = resolveProjectImages(vision.project, vision.archive);
+    assert.equal(embedded.complete, true);
+    assert.equal(embedded.images[0]?.source.kind, "archive");
+    const strict = await verifyAndEnrichProjectImages(
+      vision.project,
+      embedded.images,
+    );
+    assert.equal(strict.complete, false);
+    assert.equal(strict.issues[0]?.code, "IMAGE_FORMAT_MISMATCH");
+    const verified = await verifyAndEnrichProjectImages(
+      vision.project,
+      embedded.images,
+      { repairMismatchedExtensions: true },
+    );
+    assert.equal(verified.complete, true);
+    assert.equal(verified.extensionRepairs.length, 1);
+
+    const handle = new MemorySaveHandle();
+    const srprojXml = writeSrproj(verified.project, {
+      pathForFile: (file) => file.sourcePath,
+      allowConfirmedLoss: true,
+    });
+    assert.match(srprojXml, /<Path>images\/108\.bmp<\/Path>/u);
+    await writeSvpaArchive({
+      destination: { fileName: "repaired.svpa.zip", handle },
+      project: verified.project,
+      srprojXml,
+      images: verified.resolvedImages,
+      helper: new Blob([new Uint8Array([0x4d, 0x5a])]),
+    });
+
+    const loaded = await loadProject(browserFile([handle.blob()], "repaired.svpa.zip"));
+    try {
+      assert.equal(loaded.format, "v1-svpa");
+      assert.equal(loaded.parseResult.ok, true);
+      assert.equal(loaded.svpaManifest?.Entries.length, 1);
+      assert.equal(loaded.svpaManifest?.Entries[0]?.OriginalPath, "images/108.bmp");
+      assert.match(loaded.svpaManifest?.Entries[0]?.RelativePath ?? "", /108\.jpg$/u);
+      const image = loaded.project?.files[0]?.image;
+      assert.equal(image?.kind, "archive");
+      if (image?.kind !== "archive" || !loaded.archive || !loaded.project) return;
+      assert.match(image.entryName, /108\.jpg$/u);
+      assert.deepEqual(
+        new Uint8Array(await (await loaded.archive.readBlob(image.entryName)).arrayBuffer()),
+        bytes,
+      );
+      const reResolved = resolveProjectImages(loaded.project, loaded.archive);
+      const reverified = await verifyAndEnrichProjectImages(
+        loaded.project,
+        reResolved.images,
+      );
+      assert.equal(reverified.complete, true);
+      assert.deepEqual(reverified.issues, []);
+
+      const rebuilt = writeV2VisionProject(reverified.project, {
+        allowConfirmedLoss: true,
+        imageOutputPaths: Object.fromEntries(
+          reverified.resolvedImages.flatMap((resolvedImage) => {
+            const outputPath = resolvedImage.source.relativePath;
+            return outputPath
+              ? [[resolvedImage.fileIndex, outputPath] as const]
+              : [];
+          }),
+        ),
+      });
+      assert.equal(rebuilt.ok, true);
+      if (!rebuilt.ok) return;
+      assert.match(rebuilt.imageEntries[0]?.entryName ?? "", /108\.jpg$/u);
+      const rebuiltHandle = new MemorySaveHandle();
+      await writeVisionArchive({
+        destination: { fileName: rebuilt.fileName, handle: rebuiltHandle },
+        built: rebuilt,
+        images: reverified.resolvedImages,
+      });
+      const rebuiltVision = await loadProject(
+        browserFile([rebuiltHandle.blob()], rebuilt.fileName),
+      );
+      try {
+        assert.equal(rebuiltVision.format, "v2-visionproj");
+        assert.ok(rebuiltVision.project);
+        assert.ok(rebuiltVision.archive);
+        assert.match(rebuiltVision.project.files[0]?.sourcePath ?? "", /108\.jpg$/u);
+        const rebuiltResolved = resolveProjectImages(
+          rebuiltVision.project,
+          rebuiltVision.archive,
+        );
+        const rebuiltVerified = await verifyAndEnrichProjectImages(
+          rebuiltVision.project,
+          rebuiltResolved.images,
+        );
+        assert.equal(rebuiltVerified.complete, true);
+        assert.deepEqual(rebuiltVerified.issues, []);
+      } finally {
+        await rebuiltVision.close();
+      }
+    } finally {
+      await loaded.close();
     }
   } finally {
     await vision.close();

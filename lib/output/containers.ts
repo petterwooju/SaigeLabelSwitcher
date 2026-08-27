@@ -282,9 +282,10 @@ function assertVisionImageIdentity(
   expected: V2VisionWriteSuccess["imageEntries"][number]["source"],
   resolved: ResolvedProjectImage,
 ): void {
-  const expectedPath =
-    expected.kind === "external" ? expected.path : expected.entryName;
-  if (pathComparisonKey(expectedPath) !== pathComparisonKey(resolved.originalPath)) {
+  if (
+    expected.kind === "external" &&
+    pathComparisonKey(expected.path) !== pathComparisonKey(resolved.originalPath)
+  ) {
     throw new ContainerWriteError(
       "VISION_IMAGE_SOURCE_MISMATCH",
       `项目图片来源与文件索引 ${resolved.fileIndex} 不一致。`,

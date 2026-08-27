@@ -136,7 +136,6 @@ const uiCopy = {
     diagnosticValidationError: "项目内容无效或不完整，无法安全处理。",
     diagnosticValidationWarning: "项目内容存在需要注意的问题。",
     dimensions: "正在读取图片尺寸…",
-    imageFailure: "部分图片无法读取或不是受支持的图片格式。",
     imageDimensionsMismatch: "项目记录的图片尺寸与实际图片不一致，已停止转换。",
     imageFormatUnsupported: "图片不是已验证支持的 PNG、JPEG、BMP、GIF 或 WebP 格式。",
     imageFormatMismatch: "图片扩展名或 MIME 类型与实际文件格式不一致。",
@@ -191,7 +190,6 @@ const uiCopy = {
     diagnosticValidationError: "The project content is invalid or incomplete and cannot be processed safely.",
     diagnosticValidationWarning: "The project content has an issue that needs attention.",
     dimensions: "Reading image dimensions…",
-    imageFailure: "Some files could not be read as supported images.",
     imageDimensionsMismatch: "A recorded image size does not match the actual file, so conversion stopped.",
     imageFormatUnsupported: "An image is not a verified PNG, JPEG, BMP, GIF, or WebP file.",
     imageFormatMismatch: "An image extension or MIME type does not match its actual file format.",
@@ -246,7 +244,6 @@ const uiCopy = {
     diagnosticValidationError: "프로젝트 내용이 유효하지 않거나 불완전하여 안전하게 처리할 수 없습니다.",
     diagnosticValidationWarning: "프로젝트 내용에 확인이 필요한 문제가 있습니다.",
     dimensions: "이미지 크기를 읽는 중…",
-    imageFailure: "일부 파일을 지원되는 이미지로 읽을 수 없습니다.",
     imageDimensionsMismatch: "프로젝트에 기록된 이미지 크기와 실제 파일이 일치하지 않아 변환을 중지했습니다.",
     imageFormatUnsupported: "이미지가 검증된 PNG, JPEG, BMP, GIF 또는 WebP 형식이 아닙니다.",
     imageFormatMismatch: "이미지 확장자 또는 MIME 유형이 실제 파일 형식과 일치하지 않습니다.",
@@ -1017,7 +1014,8 @@ export function ProjectConverter() {
       } else {
         updateProgress({ stage: "converting" });
         let workingProject = originalProject;
-        const resolved: ResolvedImageSet | undefined = needsImageAccess
+        let imageOutputPaths: Readonly<Record<number, string>> | undefined;
+        let resolved: ResolvedImageSet | undefined = needsImageAccess
           ? resolveProjectImages(
               originalProject,
               loaded.archive,
@@ -1042,6 +1040,8 @@ export function ProjectConverter() {
             resolved.images,
             {
               signal,
+              repairMismatchedExtensions:
+                target === "visionproj" || target === "svpa-zip",
               onProgress: ({ completed, total }) => updateProgress({
                 stage: "reading",
                 current: completed,
@@ -1062,9 +1062,23 @@ export function ProjectConverter() {
               blocking: true,
               retryable: false,
             })));
-            throw new Error(uiCopy[operationLanguage].imageFailure);
+            setProgress(null);
+            setStatus("error");
+            return;
           }
           workingProject = enriched.project;
+          resolved = { ...resolved, images: enriched.resolvedImages };
+          imageOutputPaths =
+            target === "visionproj"
+              ? Object.fromEntries(
+                  enriched.resolvedImages.flatMap((image) => {
+                    const outputPath = image.source.relativePath?.trim();
+                    return outputPath
+                      ? [[image.fileIndex, outputPath] as const]
+                      : [];
+                  }),
+                )
+              : undefined;
         }
 
         prepared = await prepareConversionOutput({
@@ -1073,6 +1087,7 @@ export function ProjectConverter() {
           originalProject,
           workingProject,
           images: resolved?.images,
+          imageOutputPaths,
           sourceFormat: loaded.format,
           sourceProjectXmlText: loaded.projectXmlText,
           originalProjectDirectory:
