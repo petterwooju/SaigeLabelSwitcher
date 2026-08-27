@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { File as NodeFile } from "node:buffer";
 import test from "node:test";
+import { openValidatedZip } from "../lib/archive/zip.ts";
 import { resolveProjectImages } from "../lib/files/resolveImages.ts";
 import { loadProject } from "../lib/input/loadProject.ts";
 import { parseV1Srproj } from "../lib/input/v1.ts";
@@ -126,15 +127,17 @@ function projectWithContourPointCount(pointCount: number): ProjectIR {
   const source = segmentationProject();
   const ring = Array.from({ length: pointCount }, (_, index): PointIR => {
     if (index === 0) return { x: 0, y: 0 };
-    if (index === 1) return { x: 10, y: 0 };
-    if (index === pointCount - 1) return { x: 0, y: 10 };
-    return { x: 10, y: 10 };
+    if (index === 1) return { x: pointCount, y: 0 };
+    if (index === pointCount - 1) return { x: 0, y: pointCount };
+    return { x: pointCount - index, y: index };
   });
   const label = source.files[0]!.labels[0]!;
   return {
     ...source,
     files: [{
       ...source.files[0]!,
+      width: pointCount,
+      height: pointCount,
       labels: [{
         ...label,
         geometry: { contours: [ring], contourRoles: ["outer"] },
@@ -160,7 +163,7 @@ test("writers reject project-wide contour totals above the shared limit", () => 
   );
 });
 
-test("srproj writer accepts and reparses the verified large-project contour scale", () => {
+test("srproj writer accepts and normalizes the verified large-project contour scale", () => {
   const verifiedSamplePointCount = 449_243;
   assert.ok(verifiedSamplePointCount < V2_PROJECT_LIMITS.maxContourPoints);
   const source = projectWithContourPointCount(verifiedSamplePointCount);
@@ -172,6 +175,158 @@ test("srproj writer accepts and reparses the verified large-project contour scal
       reparsed.project.files[0]?.labels[0]?.geometry?.contours?.[0]?.length,
     verifiedSamplePointCount,
   );
+  assert.equal(source.files[0]?.labels[0]?.geometry.contours?.[0]?.length, verifiedSamplePointCount);
+});
+
+test("V1 srproj writer quantizes outer and inner contours without mutating the source", () => {
+  const source = segmentationProject();
+  const label = source.files[0]!.labels[0]!;
+  const outer: readonly PointIR[] = [
+    { x: 0.49, y: 0.49 },
+    { x: 0.4, y: 0.4 },
+    { x: 8.5, y: 0.49 },
+    { x: 8.5, y: 8.5 },
+    { x: 0.49, y: 8.5 },
+    { x: 0.49, y: 0.49 },
+  ];
+  const inner: readonly PointIR[] = [
+    { x: 2.5, y: 2.5 },
+    { x: 2.5, y: 6.49 },
+    { x: 6.49, y: 6.49 },
+    { x: 6.49, y: 2.5 },
+  ];
+  const project: ProjectIR = {
+    ...source,
+    files: [{
+      ...source.files[0]!,
+      labels: [{
+        ...label,
+        geometry: { contours: [outer, inner], contourRoles: ["outer", "inner"] },
+      }],
+    }],
+  };
+  const before = structuredClone(project);
+
+  const xml = writeSrproj(project);
+  const pointTags = xml.match(/<Point X="[^"]+" Y="[^"]+" \/>/gu) ?? [];
+
+  assert.deepEqual(
+    pointTags,
+    [
+      '<Point X="0" Y="9" />',
+      '<Point X="9" Y="9" />',
+      '<Point X="9" Y="0" />',
+      '<Point X="0" Y="0" />',
+      '<Point X="6" Y="3" />',
+      '<Point X="6" Y="6" />',
+      '<Point X="3" Y="6" />',
+      '<Point X="3" Y="3" />',
+    ],
+  );
+  assert.deepEqual(project, before);
+
+  const reparsed = parseV1Srproj({ xmlText: xml });
+  assert.equal(reparsed.ok, true);
+  assert.deepEqual(
+    reparsed.ok && reparsed.project.files[0]?.labels[0]?.geometry.contourRoles,
+    ["outer", "inner"],
+  );
+  if (!reparsed.ok) return;
+  const contours = reparsed.project.files[0]?.labels[0]?.geometry.contours ?? [];
+  assert.deepEqual(contours.map((ring) => ring.length), [4, 4]);
+  assert.deepEqual(
+    contours.map((ring) => area(ring.map((point) => [point.x, point.y] as const))),
+    [-81, 9],
+  );
+});
+
+test("V1 srproj writer blocks contours that collapse during integer quantization", () => {
+  const source = segmentationProject();
+  const label = source.files[0]!.labels[0]!;
+  const projectWithRing = (ring: readonly PointIR[]): ProjectIR => ({
+    ...source,
+    files: [{
+      ...source.files[0]!,
+      labels: [{
+        ...label,
+        geometry: { contours: [ring], contourRoles: ["outer"] },
+      }],
+    }],
+  });
+
+  assert.throws(
+    () => writeSrproj(projectWithRing([
+      { x: 0.1, y: 0.1 },
+      { x: 0.4, y: 0.1 },
+      { x: 0.1, y: 0.4 },
+    ])),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "SRPROJ_SEGMENTATION_CONTOUR_QUANTIZATION_INVALID" &&
+      "path" in error &&
+      error.path === "$.files[0].labels[0].geometry.contours[0]",
+  );
+
+  assert.throws(
+    () => writeSrproj(projectWithRing([
+      { x: 0.1, y: 0.1 },
+      { x: 1.1, y: 0.2 },
+      { x: 2.1, y: 0.4 },
+    ])),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "SRPROJ_SEGMENTATION_CONTOUR_QUANTIZATION_INVALID" &&
+      "path" in error &&
+      error.path === "$.files[0].labels[0].geometry.contours[0]",
+  );
+
+  for (const invalidX of [Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_647.6]) {
+    assert.throws(
+      () => writeSrproj(projectWithRing([
+        { x: 0, y: 0 },
+        { x: invalidX, y: 0 },
+        { x: 0, y: 2 },
+      ])),
+      (error: unknown) =>
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "SRPROJ_SEGMENTATION_POINT_INVALID" &&
+        "path" in error &&
+        error.path === "$.files[0].labels[0].geometry.contours[0][1].x",
+    );
+  }
+});
+
+test("V1 srproj writer preserves tiny contour orientation at large Int32 coordinates", () => {
+  const source = segmentationProject();
+  const label = source.files[0]!.labels[0]!;
+  const maximum = 2_147_483_647;
+  const project: ProjectIR = {
+    ...source,
+    files: [{
+      ...source.files[0]!,
+      width: maximum,
+      height: maximum,
+      labels: [{
+        ...label,
+        geometry: {
+          contours: [[
+            { x: maximum - 2, y: maximum - 2 },
+            { x: maximum - 2, y: maximum },
+            { x: maximum, y: maximum },
+            { x: maximum, y: maximum - 2 },
+          ]],
+          contourRoles: ["outer"],
+        },
+      }],
+    }],
+  };
+
+  const xml = writeSrproj(project);
+  assert.match(xml, /<Point X="2147483645" Y="2147483645" \/>/u);
+  assert.match(xml, /<Point X="2147483647" Y="2147483647" \/>/u);
 });
 
 function area(ring: readonly (readonly [number, number])[]): number {
@@ -422,7 +577,22 @@ test("Segmentation writer uses native bbox rounding and rejects inner-first ring
 });
 
 test("Segmentation vision and SVPA containers reload with polygon semantics", async () => {
-  const source = segmentationProject();
+  const base = segmentationProject();
+  const source: ProjectIR = {
+    ...base,
+    files: base.files.map((file) => ({
+      ...file,
+      labels: file.labels.map((label) => ({
+        ...label,
+        geometry: {
+          ...label.geometry,
+          contours: label.geometry.contours?.map((ring) =>
+            ring.map((point) => ({ x: point.x + 0.25, y: point.y + 0.25 })),
+          ),
+        },
+      })),
+    })),
+  };
   const built = writeV2VisionProject(source);
   assert.equal(built.ok, true);
   if (!built.ok) return;
@@ -460,6 +630,11 @@ test("Segmentation vision and SVPA containers reload with polygon semantics", as
       pathForFile: (file) => file.sourcePath,
       allowConfirmedLoss: true,
     });
+    assert.equal(
+      [...xml.matchAll(/<Point X="([^"]+)" Y="([^"]+)" \/>/gu)]
+        .every((match) => Number.isSafeInteger(Number(match[1])) && Number.isSafeInteger(Number(match[2]))),
+      true,
+    );
     const svpaHandle = new MemorySaveHandle();
     await writeSvpaArchive({
       destination: { fileName: "segmentation-svpa.zip", handle: svpaHandle },
@@ -468,6 +643,21 @@ test("Segmentation vision and SVPA containers reload with polygon semantics", as
       images: resolved.images,
       helper: new Blob([new Uint8Array([0x4d, 0x5a])]),
     });
+
+    const archive = await openValidatedZip(svpaHandle.blob());
+    try {
+      const srprojEntries = archive.names().filter((name) => name.endsWith(".srproj"));
+      assert.equal(srprojEntries.length, 1);
+      const archivedXml = await archive.readText(srprojEntries[0]!);
+      assert.equal(archivedXml, xml);
+      assert.equal(
+        [...archivedXml.matchAll(/<Point X="([^"]+)" Y="([^"]+)" \/>/gu)]
+          .every((match) => /^-?\d+$/u.test(match[1]!) && /^-?\d+$/u.test(match[2]!)),
+        true,
+      );
+    } finally {
+      await archive.close();
+    }
 
     const v1 = await loadProject(
       browserFile(svpaHandle.blob(), "segmentation-svpa.zip"),
