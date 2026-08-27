@@ -33,6 +33,22 @@ test("preserves save results and guards the complete image verification path", a
     converter,
     /if \(requiresImages \|\| requiresDimensions\)[\s\S]*?if \(!resolved\) throw[\s\S]*?verifyAndEnrichProjectImages/,
   );
+  assert.match(
+    converter,
+    /repairMismatchedExtensions:[\s\S]*?target === "visionproj" \|\| target === "svpa-zip"/,
+  );
+  assert.match(
+    converter,
+    /target === "visionproj"[\s\S]*?enriched\.resolvedImages\.flatMap/,
+  );
+  assert.match(
+    converter,
+    /if \(!enriched\.complete\)[\s\S]*?setStatus\("error"\);[\s\S]*?return;/,
+  );
+  assert.doesNotMatch(
+    converter,
+    /throw new Error\(uiCopy\[operationLanguage\]\.imageFailure\)/,
+  );
   assert.doesNotMatch(converter, /enrichProjectImageDimensions/);
   assert.match(shell, /result\.mode === "direct"/);
   assert.match(shell, /result\.fileName/);

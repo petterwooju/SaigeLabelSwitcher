@@ -524,6 +524,45 @@ test("vision output maps duplicate Windows basenames to unique images entries", 
   assert.equal(result.imageEntries[0]?.source.kind, "external");
 });
 
+test("vision output applies verified image extension repairs without changing sources", () => {
+  const project = v1ClassificationProject();
+  const result = writeV2VisionProject(project, {
+    imageOutputPaths: {
+      0: "Images/line-a/repaired.jpg",
+      1: "line-a/repaired.jpg",
+    },
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(
+    result.imageEntries.map((item) => item.entryName),
+    ["images/line-a/repaired.jpg", "images/line-a/repaired_2.jpg"],
+  );
+  assert.deepEqual(
+    ((result.json.project as JsonObject).projectFiles as readonly JsonObject[]).map(
+      (item) => item.filePath,
+    ),
+    ["images/line-a/repaired.jpg", "images/line-a/repaired_2.jpg"],
+  );
+  assert.equal(result.imageEntries[0]?.source, project.files[0]?.image);
+  assert.equal(result.imageEntries[1]?.source, project.files[1]?.image);
+  assert.equal(project.files[0]?.sourcePath, "C:\\line-a\\frame.png");
+});
+
+test("vision output blocks unsafe repaired image paths", () => {
+  const result = writeV2VisionProject(v1ClassificationProject(), {
+    imageOutputPaths: { 0: "../outside.jpg" },
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (item) => item.code === "V2_WRITE_IMAGE_OUTPUT_PATH_INVALID",
+    ),
+  );
+});
+
 test("V2 golden-like roundtrip preserves raw data and changes only filePath", () => {
   const golden = v2GoldenLike();
   const parsed = parseV2SubvisionProject({

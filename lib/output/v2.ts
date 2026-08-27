@@ -73,6 +73,11 @@ export interface V2SubvisionWriterOptions extends V2WriterOptions {
 export interface V2VisionWriterOptions extends V2WriterOptions {
   readonly fileName?: string;
   readonly projectJsonEntryName?: string;
+  /**
+   * Verified output-relative image paths keyed by canonical file index.
+   * Sources and bytes are retained; only the new archive entry is renamed.
+   */
+  readonly imageOutputPaths?: Readonly<Record<number, string>>;
 }
 
 export interface V2VisionImageEntry {
@@ -238,7 +243,14 @@ export function writeV2VisionProject(
     return { ok: false, diagnostics };
   }
 
-  const imageEntries = buildImageEntries(project.files);
+  const imageEntries = buildImageEntries(
+    project.files,
+    options.imageOutputPaths,
+    diagnostics,
+  );
+  if (hasBlockingDiagnostic(diagnostics)) {
+    return { ok: false, diagnostics };
+  }
   const json = buildProjectJson(
     project,
     imageEntries.map((entry) => entry.entryName),
@@ -1617,13 +1629,24 @@ function v2SplitType(
 
 function buildImageEntries(
   files: readonly ProjectFileIR[],
+  outputPaths: Readonly<Record<number, string>> | undefined,
+  diagnostics: ProjectDiagnostic[],
 ): V2VisionImageEntry[] {
   const used = new Set<string>();
   const nextSequenceByBase = new Map<string, number>();
   return [...files]
     .sort((left, right) => left.index - right.index)
     .map((file) => {
-      const entryName = uniqueImageEntryName(file, used, nextSequenceByBase);
+      const requestedOutputPath = outputPaths?.[file.index];
+      const entryName = requestedOutputPath
+        ? uniqueRequestedImageEntryName(
+            requestedOutputPath,
+            file.index,
+            used,
+            nextSequenceByBase,
+            diagnostics,
+          )
+        : uniqueImageEntryName(file, used, nextSequenceByBase);
       return {
         fileIndex: file.index,
         ...(file.sourceId !== undefined ? { sourceFileId: file.sourceId } : {}),
@@ -1634,6 +1657,74 @@ function buildImageEntries(
           : {}),
       };
     });
+}
+
+function uniqueRequestedImageEntryName(
+  requestedPath: string,
+  fileIndex: number,
+  used: Set<string>,
+  nextSequenceByBase: Map<string, number>,
+  diagnostics: ProjectDiagnostic[],
+): string {
+  const slashPath = requestedPath.trim().replace(/\\/gu, "/");
+  const rootedPath = slashPath.toLocaleLowerCase("en-US").startsWith("images/")
+    ? `images/${slashPath.slice("images/".length)}`
+    : `images/${slashPath}`;
+  const validation = validateZipEntryPath(rootedPath);
+  if (
+    !validation.safe ||
+    !validation.normalizedPath.toLocaleLowerCase("en-US").startsWith("images/") ||
+    !archiveEntryNameFitsLimits(validation.normalizedPath)
+  ) {
+    block(
+      diagnostics,
+      "V2_WRITE_IMAGE_OUTPUT_PATH_INVALID",
+      `$.options.imageOutputPaths[${fileIndex}]`,
+      "A repaired image output path must be a safe, bounded relative path inside the images directory.",
+    );
+    return uniqueImageEntryNameForFallback(fileIndex, used, nextSequenceByBase);
+  }
+
+  return uniqueArchiveEntryName(
+    validation.normalizedPath,
+    used,
+    nextSequenceByBase,
+  );
+}
+
+function uniqueArchiveEntryName(
+  requestedEntryName: string,
+  used: Set<string>,
+  nextSequenceByBase: Map<string, number>,
+): string {
+  const lastSlash = requestedEntryName.lastIndexOf("/");
+  const directory =
+    lastSlash >= 0 ? requestedEntryName.slice(0, lastSlash + 1) : "";
+  const fileName =
+    lastSlash >= 0 ? requestedEntryName.slice(lastSlash + 1) : requestedEntryName;
+  let candidate = requestedEntryName;
+  const baseKey = entryKey(requestedEntryName);
+  let sequence = nextSequenceByBase.get(baseKey) ?? 2;
+  while (used.has(entryKey(candidate))) {
+    candidate = `${directory}${fitFileName(fileName, `_${sequence}`)}`;
+    sequence += 1;
+  }
+  nextSequenceByBase.set(baseKey, sequence);
+  used.add(entryKey(candidate));
+  return candidate;
+}
+
+function uniqueImageEntryNameForFallback(
+  fileIndex: number,
+  used: Set<string>,
+  nextSequenceByBase: Map<string, number>,
+): string {
+  const safeName = safeImageFileName(`image_${fileIndex + 1}`, fileIndex);
+  return uniqueArchiveEntryName(
+    `images/${safeName}`,
+    used,
+    nextSequenceByBase,
+  );
 }
 
 function uniqueImageEntryName(

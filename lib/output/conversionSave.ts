@@ -63,6 +63,8 @@ export interface PrepareConversionOutputOptions {
   readonly originalProject: ProjectIR;
   readonly workingProject: ProjectIR;
   readonly images?: readonly ResolvedProjectImage[];
+  /** Verified output-relative paths for images written to a complete V2 archive. */
+  readonly imageOutputPaths?: Readonly<Record<number, string>>;
   readonly sourceFormat: ProjectSourceFormat;
   readonly sourceProjectXmlText?: string;
   readonly originalProjectDirectory?: string;
@@ -91,6 +93,7 @@ export async function prepareConversionOutput({
   originalProject,
   workingProject,
   images,
+  imageOutputPaths,
   sourceFormat,
   sourceProjectXmlText,
   originalProjectDirectory = "",
@@ -112,7 +115,10 @@ export async function prepareConversionOutput({
   }
 
   if (target === "visionproj") {
-    const result = writeV2VisionProject(workingProject, { allowConfirmedLoss });
+    const result = writeV2VisionProject(workingProject, {
+      allowConfirmedLoss,
+      imageOutputPaths,
+    });
     if (!result.ok) throw new WriterDiagnosticsError(result.diagnostics);
     if (!images) throw new Error("Project images are required for a complete V2 project.");
     const archive = prepareVisionArchive({ built: result, images });

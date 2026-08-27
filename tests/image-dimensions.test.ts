@@ -263,6 +263,102 @@ test("verifies existing dimensions and rejects mismatched format and size", asyn
   assert.equal(result.issues.some((item) => item.fileIndex === 0), false);
 });
 
+test("repairs a verified extension mismatch for complete-output preparation", async () => {
+  const bytes = jpeg(514, 1306);
+  const output = new BlobWriter("application/zip");
+  const writer = new ZipWriter(output, { useWebWorkers: false });
+  await writer.add("images/source/108.bmp", new Uint8ArrayReader(bytes), { level: 0 });
+  await writer.close();
+  const archive = await openValidatedZip(await output.getData());
+  const sourceFile: ProjectFileIR = {
+    ...file(0, { width: 514, height: 1306 }),
+    fileName: "108.bmp",
+    sourcePath: "C:/images/108.bmp",
+    normalizedPath: "C:/images/108.bmp",
+    image: { kind: "archive", entryName: "images/source/108.bmp" },
+  };
+  const source: ResolvedProjectImage = {
+    fileIndex: 0,
+    originalPath: sourceFile.sourcePath,
+    source: {
+      kind: "archive",
+      archive,
+      entryName: "images/source/108.bmp",
+      size: bytes.byteLength,
+      relativePath: "source/108.bmp",
+    },
+  };
+  const v2Project: ProjectIR = {
+    ...project([sourceFile]),
+    source: { format: "v2-visionproj", rawProjectType: "Classification" },
+  };
+
+  try {
+    const strict = await verifyAndEnrichProjectImages(v2Project, [source]);
+    assert.equal(strict.complete, false);
+    assert.equal(strict.issues[0]?.code, "IMAGE_FORMAT_MISMATCH");
+
+    const result = await verifyAndEnrichProjectImages(
+      v2Project,
+      [source],
+      { repairMismatchedExtensions: true },
+    );
+    assert.equal(result.complete, true);
+    assert.deepEqual(result.issues, []);
+    assert.deepEqual(result.extensionRepairs, [{
+      fileIndex: 0,
+      originalPath: "C:/images/108.bmp",
+      outputRelativePath: "source/108.jpg",
+      detectedFormat: "jpeg",
+    }]);
+    assert.equal(result.resolvedImages[0]?.source.relativePath, "source/108.jpg");
+    assert.equal(source.source.relativePath, "source/108.bmp");
+    assert.equal(result.project.files[0]?.sourcePath, "C:/images/108.bmp");
+
+    const wrongSize: ProjectIR = {
+      ...v2Project,
+      files: [{ ...sourceFile, width: 513 }],
+    };
+    const rejected = await verifyAndEnrichProjectImages(wrongSize, [source], {
+      repairMismatchedExtensions: true,
+    });
+    assert.equal(rejected.complete, false);
+    assert.equal(rejected.issues[0]?.code, "IMAGE_DIMENSIONS_MISMATCH");
+    assert.equal(rejected.extensionRepairs.length, 0);
+
+    const v1 = await verifyAndEnrichProjectImages(project([sourceFile]), [source], {
+      repairMismatchedExtensions: true,
+    });
+    assert.equal(v1.complete, true);
+    assert.equal(v1.extensionRepairs.length, 1);
+    assert.equal(v1.resolvedImages[0]?.source.relativePath, "source/108.jpg");
+  } finally {
+    await archive.close();
+  }
+});
+
+test("does not treat a MIME-only disagreement as a repairable extension mismatch", async () => {
+  const sourceFile: ProjectFileIR = {
+    ...file(0, { width: 12, height: 9 }),
+    fileName: "correct.jpg",
+    sourcePath: "C:/images/correct.jpg",
+    normalizedPath: "C:/images/correct.jpg",
+  };
+  const result = await verifyAndEnrichProjectImages(
+    project([sourceFile]),
+    [{
+      fileIndex: 0,
+      originalPath: sourceFile.sourcePath,
+      source: { kind: "blob", blob: imageBlob(jpeg(12, 9), "image/png") },
+    }],
+    { repairMismatchedExtensions: true },
+  );
+
+  assert.equal(result.complete, false);
+  assert.equal(result.extensionRepairs.length, 0);
+  assert.equal(result.issues[0]?.code, "IMAGE_FORMAT_MISMATCH");
+});
+
 test("full verification enriches missing dimensions and honors abort", async () => {
   const missing = file(0);
   const result = await verifyAndEnrichProjectImages(project([missing]), [
@@ -395,6 +491,15 @@ test("rejects unknown image formats without invoking a bitmap fallback", async (
     assert.equal(result.issues[0]?.code, "IMAGE_FORMAT_UNSUPPORTED");
     assert.deepEqual(result.updatedFileIndexes, []);
     assert.equal(calls, 0);
+
+    const repairAttempt = await verifyAndEnrichProjectImages(
+      project([file(0)]),
+      [resolved(0, new Uint8Array([1, 2, 3, 4]))],
+      { repairMismatchedExtensions: true },
+    );
+    assert.equal(repairAttempt.complete, false);
+    assert.equal(repairAttempt.issues[0]?.code, "IMAGE_FORMAT_UNSUPPORTED");
+    assert.deepEqual(repairAttempt.extensionRepairs, []);
   } finally {
     if (descriptor) {
       Object.defineProperty(globalThis, "createImageBitmap", descriptor);

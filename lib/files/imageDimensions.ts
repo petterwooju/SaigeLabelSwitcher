@@ -63,17 +63,40 @@ export interface ImageDimensionEnrichmentResult {
   readonly complete: boolean;
 }
 
+export interface ImageExtensionRepair {
+  readonly fileIndex: number;
+  readonly originalPath: string;
+  readonly outputRelativePath: string;
+  readonly detectedFormat: Exclude<ImageDimensionFormat, "unknown">;
+}
+
+export interface ImageVerificationResult extends ImageDimensionEnrichmentResult {
+  /**
+   * Image sources prepared for the target container. Their bytes and source
+   * identities are unchanged; only the output relative-path hint may be
+   * corrected after a verified header/extension mismatch.
+   */
+  readonly resolvedImages: readonly ResolvedProjectImage[];
+  readonly extensionRepairs: readonly ImageExtensionRepair[];
+}
+
 type ProgressHandler = (progress: ImageDimensionProgress) => void;
 
 export interface ImageVerificationOptions {
   readonly signal?: AbortSignal;
   readonly onProgress?: ProgressHandler;
+  /**
+   * Prepare a complete output container to store verified bytes under an
+   * extension that matches their header. This never changes source files or
+   * image bytes. Callers must keep this disabled for lightweight outputs.
+   */
+  readonly repairMismatchedExtensions?: boolean;
 }
 
 interface Dimensions {
   readonly width: number;
   readonly height: number;
-  readonly format: ImageDimensionFormat;
+  readonly format: Exclude<ImageDimensionFormat, "unknown">;
 }
 
 interface HeaderDimensions extends Dimensions {
@@ -197,13 +220,15 @@ export async function verifyAndEnrichProjectImages(
   project: ProjectIR,
   resolvedImages: readonly ResolvedProjectImage[],
   options: ImageVerificationOptions = {},
-): Promise<ImageDimensionEnrichmentResult> {
+): Promise<ImageVerificationResult> {
   const targets = [...project.files].sort((left, right) => left.index - right.index);
   const targetIndexes = new Set(targets.map((file) => file.index));
   const sources = indexResolvedSources(resolvedImages, targetIndexes);
   const issues: ImageDimensionIssue[] = [];
   const updated = new Map<number, ProjectFileIR>();
   const updatedFileIndexes: number[] = [];
+  const extensionRepairs: ImageExtensionRepair[] = [];
+  const repairedRelativePathByIndex = new Map<number, string>();
   let completed = 0;
 
   for (const file of targets) {
@@ -229,10 +254,21 @@ export async function verifyAndEnrichProjectImages(
       if ("issue" in probe) issue = probe.issue;
       else detected = probe.dimensions;
       if (detected) {
-        issue =
-          validateDetectedDimensions(file, detected) ??
-          validateDetectedFormat(file, resolved.source, detected) ??
-          validateDeclaredDimensions(file, detected);
+        issue = validateDetectedDimensions(file, detected);
+        if (!issue) {
+          const formatIssue = validateDetectedFormat(file, resolved.source, detected);
+          const repair =
+            formatIssue &&
+            options.repairMismatchedExtensions
+              ? extensionRepair(file, resolved, detected)
+              : undefined;
+          if (!repair) issue = formatIssue;
+          issue ??= validateDeclaredDimensions(file, detected);
+          if (!issue && repair) {
+            extensionRepairs.push(repair);
+            repairedRelativePathByIndex.set(file.index, repair.outputRelativePath);
+          }
+        }
       }
     }
 
@@ -276,10 +312,54 @@ export async function verifyAndEnrichProjectImages(
     project: { ...project, files },
     issues,
     updatedFileIndexes,
+    resolvedImages: resolvedImages.map((image) => {
+      const outputRelativePath = repairedRelativePathByIndex.get(image.fileIndex);
+      if (!outputRelativePath) return image;
+      return {
+        ...image,
+        source: { ...image.source, relativePath: outputRelativePath },
+      };
+    }),
+    extensionRepairs,
     complete:
       issues.length === 0 &&
       files.every((file) => isValidDimensionPair(file.width, file.height)),
   };
+}
+
+function extensionRepair(
+  file: ProjectFileIR,
+  resolved: ResolvedProjectImage,
+  detected: Dimensions,
+): ImageExtensionRepair | undefined {
+  const declaredFormat = extensionFormatForSource(file, resolved.source);
+  if (declaredFormat === undefined || declaredFormat === detected.format) {
+    return undefined;
+  }
+  const sourceRelativePath = resolved.source.relativePath || file.fileName;
+  return {
+    fileIndex: file.index,
+    originalPath: file.sourcePath,
+    outputRelativePath: replaceExtension(
+      sourceRelativePath,
+      canonicalExtension(detected.format),
+    ),
+    detectedFormat: detected.format,
+  };
+}
+
+function canonicalExtension(
+  format: Exclude<ImageDimensionFormat, "unknown">,
+): string {
+  return format === "jpeg" ? "jpg" : format;
+}
+
+function replaceExtension(value: string, extension: string): string {
+  const slash = Math.max(value.lastIndexOf("/"), value.lastIndexOf("\\"));
+  const dot = value.lastIndexOf(".");
+  return dot > slash
+    ? `${value.slice(0, dot)}.${extension}`
+    : `${value}.${extension}`;
 }
 
 function indexResolvedSources(
@@ -573,7 +653,7 @@ function validateDetectedFormat(
   source: BinarySource,
   detected: Dimensions,
 ): ImageDimensionIssue | undefined {
-  const extensionFormat = formatFromExtension(file.fileName || file.sourcePath);
+  const extensionFormat = extensionFormatForSource(file, source);
   let mimeFormat: ImageDimensionFormat | undefined;
   if (source.kind === "blob") {
     mimeFormat = formatFromMime(source.blob.type);
@@ -592,6 +672,18 @@ function validateDetectedFormat(
     );
   }
   return undefined;
+}
+
+function extensionFormatForSource(
+  file: ProjectFileIR,
+  source: BinarySource,
+): ImageDimensionFormat | undefined {
+  const path =
+    source.relativePath ||
+    (source.kind === "archive"
+      ? source.entryName
+      : file.fileName || file.sourcePath);
+  return formatFromExtension(path);
 }
 
 function formatFromExtension(value: string): ImageDimensionFormat | undefined {
