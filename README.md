@@ -27,7 +27,7 @@ V1 的训练参数和数据增强参数目前没有经过验证的 V2 对应字�
 
 ROI 当前支持“未启用”和经过真实样本验证的 `Simple + Rectangle`：V1 的归一化 `X/Y/Width/Height` 会转换为 V2 的 `left/top/right/bottom`（V2 原始字段名仍为 `roiPosX/roiPosY/roiWidth/roiHeight`）。Advanced、Ellipse、Blind、非默认 ROI 设置及未知形状会明确阻断，绝不通过确认框静默丢弃。V1→V2 会按目标图像尺寸重建可编辑的矩形 `roiShape`；派生 `roiBitmap` 不伪造。生成结果已在目标 V2 完成 ROI 打开、显示与重新保存的实机验收。
 
-Segmentation 当前支持 V1 `Contours` 与 V2 `labelContour` 多边形，按环方向保留 `Outer/Inner` 与孔洞；bitmap-only mask、退化/方向不明确的环会明确阻断。Detection、ROD、OCR 等尚未验证类型仍会明确阻断，不会“尽力转换”或静默丢弃标注。
+Segmentation 当前支持 V1 `Contours` 与 V2 `labelContour` 多边形，按环方向保留 `Outer/Inner` 与孔洞。V2 浮点轮廓在写入 V1 时会按最近像素取整，并在去除取整产生的相邻重复点后重新校验点数、面积和方向；取整后退化的轮廓会明确阻断。bitmap-only mask、方向不明确的环、Detection、ROD、OCR 等尚未验证内容同样不会被静默转换。
 
 浏览器安全处理边界为：V1 XML 项目文本 32 MiB、V2 JSON 项目文本 16 MiB，单个项目累计最多 500,000 个多边形轮廓点。超过边界时页面会明确说明项目规模暂不支持；这不代表源项目已经损坏，源文件也不会被修改。
 

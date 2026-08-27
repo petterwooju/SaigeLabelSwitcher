@@ -144,6 +144,7 @@ manifest 最小结构：
 - 写出 V1 可表达的项目类型、类别、颜色、图片、宽高、Split 和标注。
 - V2 数值/字符串 ID 不直接泄漏进 V1 索引字段；类别和图片引用按稳定顺序重建。
 - V2 `train` / `val` 映射到 V1 `Training` / `Validation`；多个 V2 splitSets 的降维规则必须通过项目类型 fixture 明确。
+- V1 分割轮廓坐标必须写成整数。V2 浮点坐标使用 `Math.round` 映射到最近像素，删除量化产生的相邻重复点及闭环重复末点后，重新验证至少三个有效点、非零面积和 `Outer/Inner` 方向；量化后退化必须阻断。
 - 若选择 `.srproj` 单文件输出：
   - `.subvisionproj` 输入优先保留其源路径；
   - `.visionproj` 输入仅在存在可用外部路径，或用户明确选择“导出图片到目标目录”时显示该输出；否则隐藏 `.srproj`，只提供 SVPA ZIP；

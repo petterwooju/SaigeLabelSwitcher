@@ -17,6 +17,9 @@ import {
   V1_PROJECT_LIMITS,
 } from "../security/resourceLimits.ts";
 
+const V1_POINT_MIN = -2_147_483_648;
+const V1_POINT_MAX = 2_147_483_647;
+
 export interface SrprojWriteOptions {
   /** V1 schema version is intentionally pinned to the verified golden version. */
   readonly version?: "0.9";
@@ -511,38 +514,83 @@ function normalizeV1Ring(
       "A contour ring requires at least three points.",
     );
   }
-  const ring = source.map((point) => ({ x: point.x, y: point.y }));
-  const area = signedRingArea(ring, path);
+  const ring: PointIR[] = [];
+  for (const [pointIndex, point] of source.entries()) {
+    const quantized = {
+      x: quantizeV1Coordinate(point.x, `${path}[${pointIndex}].x`),
+      y: quantizeV1Coordinate(point.y, `${path}[${pointIndex}].y`),
+    };
+    if (!samePoint(ring.at(-1), quantized)) ring.push(quantized);
+  }
+  if (ring.length > 1 && samePoint(ring[0], ring.at(-1))) ring.pop();
+  const uniquePointCount = new Set(ring.map((point) => `${point.x},${point.y}`)).size;
+  if (ring.length < 3 || uniquePointCount < 3) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_CONTOUR_QUANTIZATION_INVALID",
+      path,
+      "Rounding contour coordinates to V1 integer pixels leaves fewer than three distinct points.",
+    );
+  }
+  const orientation = signedRingOrientation(ring, path);
   const wantsPositiveArea = role === "inner";
-  if ((area > 0) !== wantsPositiveArea) ring.reverse();
+  if ((orientation > 0) !== wantsPositiveArea) ring.reverse();
   return ring;
 }
 
-function signedRingArea(points: readonly PointIR[], path: string): number {
-  let doubledArea = 0;
+function quantizeV1Coordinate(value: number, path: string): number {
+  if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_POINT_INVALID",
+      path,
+      "Contour coordinates must be finite numbers within the safe numeric range.",
+    );
+  }
+  const rounded = Math.round(value);
+  if (rounded < V1_POINT_MIN || rounded > V1_POINT_MAX) {
+    throw new SrprojWriteError(
+      "SRPROJ_SEGMENTATION_POINT_INVALID",
+      path,
+      "V1 contour coordinates must fit in a signed 32-bit integer.",
+    );
+  }
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+function samePoint(left: PointIR | undefined, right: PointIR | undefined): boolean {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.x === right.x &&
+    left.y === right.y
+  );
+}
+
+function signedRingOrientation(points: readonly PointIR[], path: string): number {
+  const zero = BigInt(0);
+  let doubledArea = zero;
   for (const [index, point] of points.entries()) {
     finiteXmlNumber(point.x, `${path}[${index}].x`);
     finiteXmlNumber(point.y, `${path}[${index}].y`);
     const next = points[(index + 1) % points.length]!;
-    doubledArea += point.x * next.y - next.x * point.y;
+    doubledArea +=
+      BigInt(point.x) * BigInt(next.y) - BigInt(next.x) * BigInt(point.y);
   }
-  const area = doubledArea / 2;
-  if (!Number.isFinite(area) || area === 0) {
+  if (doubledArea === zero) {
     throw new SrprojWriteError(
-      "SRPROJ_SEGMENTATION_CONTOUR_AREA_INVALID",
+      "SRPROJ_SEGMENTATION_CONTOUR_QUANTIZATION_INVALID",
       path,
-      "A contour ring must have non-zero finite area.",
+      "Rounding contour coordinates to V1 integer pixels produces a zero-area contour.",
     );
   }
-  return area;
+  return doubledArea > zero ? 1 : -1;
 }
 
 function finiteXmlNumber(value: number, path: string): string {
-  if (!Number.isFinite(value)) {
+  if (!Number.isInteger(value) || value < V1_POINT_MIN || value > V1_POINT_MAX) {
     throw new SrprojWriteError(
       "SRPROJ_SEGMENTATION_POINT_INVALID",
       path,
-      "Contour coordinates must be finite numbers.",
+      "V1 contour coordinates must be signed 32-bit integers.",
     );
   }
   return Object.is(value, -0) ? "0" : String(value);
