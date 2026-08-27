@@ -551,16 +551,24 @@ test("vision output applies verified image extension repairs without changing so
 });
 
 test("vision output blocks unsafe repaired image paths", () => {
-  const result = writeV2VisionProject(v1ClassificationProject(), {
-    imageOutputPaths: { 0: "../outside.jpg" },
-  });
+  for (const repairedPath of [
+    "../outside.jpg",
+    "CON.jpg",
+    "trailing. ",
+    "control\nname.jpg",
+  ]) {
+    const result = writeV2VisionProject(v1ClassificationProject(), {
+      imageOutputPaths: { 0: repairedPath },
+    });
 
-  assert.equal(result.ok, false);
-  assert.ok(
-    result.diagnostics.some(
-      (item) => item.code === "V2_WRITE_IMAGE_OUTPUT_PATH_INVALID",
-    ),
-  );
+    assert.equal(result.ok, false, repairedPath);
+    assert.ok(
+      result.diagnostics.some(
+        (item) => item.code === "V2_WRITE_IMAGE_OUTPUT_PATH_INVALID",
+      ),
+      repairedPath,
+    );
+  }
 });
 
 test("V2 golden-like roundtrip preserves raw data and changes only filePath", () => {

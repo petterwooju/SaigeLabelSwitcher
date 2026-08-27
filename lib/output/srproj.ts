@@ -13,8 +13,10 @@ import { APP_VERSION, isSupportedProjectType } from "../release.ts";
 import {
   countProjectContourPoints,
   exceedsUtf8ByteLimit,
+  PROJECT_PATH_MAX_BYTES,
   V1_PROJECT_TEXT_MAX_BYTES,
   V1_PROJECT_LIMITS,
+  V2_PROJECT_LIMITS,
 } from "../security/resourceLimits.ts";
 
 const V1_POINT_MIN = -2_147_483_648;
@@ -64,6 +66,27 @@ export function writeSrproj(
       "$.project.type",
       `v${APP_VERSION} supports only Classification and polygon Segmentation; received '${project.project.rawType}'.`,
     );
+  }
+  if (project.files.length > V1_PROJECT_LIMITS.maxFiles) {
+    throw new SrprojWriteError(
+      "SRPROJ_FILE_LIMIT_EXCEEDED",
+      "$.files",
+      `V1 image count must not exceed ${V1_PROJECT_LIMITS.maxFiles}.`,
+    );
+  }
+  let totalLabels = 0;
+  for (const file of project.files) {
+    totalLabels = Math.min(
+      V2_PROJECT_LIMITS.maxLabels + 1,
+      totalLabels + file.labels.length,
+    );
+    if (totalLabels > V2_PROJECT_LIMITS.maxLabels) {
+      throw new SrprojWriteError(
+        "SRPROJ_LABEL_LIMIT_EXCEEDED",
+        "$.files[*].labels",
+        `Total V1 label count exceeds ${V2_PROJECT_LIMITS.maxLabels}.`,
+      );
+    }
   }
   const totalContourPoints = countProjectContourPoints(
     project,
@@ -634,6 +657,13 @@ export const buildSrproj = writeSrproj;
 function orderAndValidateClasses(
   input: readonly ProjectClassIR[],
 ): ProjectClassIR[] {
+  if (input.length > V1_PROJECT_LIMITS.maxClasses) {
+    throw new SrprojWriteError(
+      "SRPROJ_CLASS_LIMIT_EXCEEDED",
+      "$.classes",
+      `V1 class count must not exceed ${V1_PROJECT_LIMITS.maxClasses}.`,
+    );
+  }
   const classes = [...input].sort(
     (left, right) => left.index - right.index || left.sourceIndex - right.sourceIndex,
   );
@@ -668,6 +698,13 @@ function orderAndValidateClasses(
 }
 
 function orderAndValidateFiles(input: readonly ProjectFileIR[]): ProjectFileIR[] {
+  if (input.length > V1_PROJECT_LIMITS.maxFiles) {
+    throw new SrprojWriteError(
+      "SRPROJ_FILE_LIMIT_EXCEEDED",
+      "$.files",
+      `V1 image count must not exceed ${V1_PROJECT_LIMITS.maxFiles}.`,
+    );
+  }
   const files = [...input].sort((left, right) => left.index - right.index);
   const indexes = new Set<number>();
   for (const [position, item] of files.entries()) {
@@ -691,7 +728,7 @@ function resolveOutputPath(
 ): string {
   const path = options.pathForFile?.(file, outputIndex);
   if (path !== undefined) {
-    return requiredText(path, `$.files[${outputIndex}].sourcePath`, "SRPROJ_IMAGE_PATH_INVALID");
+    return validatedV1ImagePath(path, `$.files[${outputIndex}].sourcePath`);
   }
   if (file.image.kind === "archive") {
     throw new SrprojWriteError(
@@ -700,14 +737,20 @@ function resolveOutputPath(
       "Archive-backed images require pathForFile; ZIP entry names are not durable V1 paths.",
     );
   }
-  return requiredText(
+  return validatedV1ImagePath(
     file.image.path || file.sourcePath,
     `$.files[${outputIndex}].sourcePath`,
-    "SRPROJ_IMAGE_PATH_INVALID",
   );
 }
 
 function resolveClassificationClassIndex(file: ProjectFileIR, path: string): number {
+  if (file.labels.some((label) => label.kind !== "classification")) {
+    throw new SrprojWriteError(
+      "SRPROJ_CLASSIFICATION_LABEL_KIND_UNSUPPORTED",
+      `${path}.labels`,
+      "V1 Classification accepts classification labels only.",
+    );
+  }
   const labelIndexes = file.labels
     .filter((label) => label.kind === "classification")
     .map((label) => label.classIndex)
@@ -741,6 +784,30 @@ function resolveClassificationClassIndex(file: ProjectFileIR, path: string): num
     );
   }
   return nonNegativeInteger(result, `${path}.classificationClassIndex`);
+}
+
+function validatedV1ImagePath(value: string, path: string): string {
+  const result = requiredText(value, path, "SRPROJ_IMAGE_PATH_INVALID");
+  if (exceedsUtf8ByteLimit(result, PROJECT_PATH_MAX_BYTES)) {
+    throw new SrprojWriteError(
+      "SRPROJ_IMAGE_PATH_LIMIT_EXCEEDED",
+      path,
+      `V1 image paths must not exceed ${PROJECT_PATH_MAX_BYTES} UTF-8 bytes.`,
+    );
+  }
+  if (
+    Array.from(result).some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 0x1f || codePoint === 0x7f;
+    })
+  ) {
+    throw new SrprojWriteError(
+      "SRPROJ_IMAGE_PATH_CONTROL_CHARACTER",
+      path,
+      "V1 image paths cannot contain control characters.",
+    );
+  }
+  return result;
 }
 
 function splitToV1(split: SplitType, path: string): string {

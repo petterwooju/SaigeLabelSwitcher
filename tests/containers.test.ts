@@ -4,8 +4,10 @@ import test from "node:test";
 import { openValidatedZip, type OpenArchive } from "../lib/archive/zip.ts";
 import { loadProject } from "../lib/input/loadProject.ts";
 import type { ProjectFileIR, ProjectIR } from "../lib/model/project.ts";
+import { APP_VERSION } from "../lib/release.ts";
 import {
   assignUniqueSvpaImagePaths,
+  assertContainerArchiveEntryNames,
   assertContainerArchiveLimits,
   containerArchiveEntryCount,
   ContainerWriteError,
@@ -173,6 +175,39 @@ test("container resource preflight mirrors archive reader boundaries", () => {
   );
 });
 
+test("container entry-name preflight mirrors the reader's exact cumulative boundary", () => {
+  const count = BROWSER_ARCHIVE_LIMITS.maxEntries;
+  const maximum = BROWSER_ARCHIVE_LIMITS.maxTotalEntryNameBytes;
+  const baseSize = Math.floor(maximum / count);
+  const extraCount = maximum - baseSize * count;
+  const names = Array.from({ length: count }, (_, index) =>
+    archiveNameOfExactUtf8Size(index, baseSize + (index < extraCount ? 1 : 0)),
+  );
+
+  assert.equal(assertContainerArchiveEntryNames(count, names), maximum);
+  const over = [...names];
+  over[0] = `${over[0]}x`;
+  assert.throws(
+    () => assertContainerArchiveEntryNames(count, over),
+    (error: unknown) =>
+      error instanceof ContainerWriteError &&
+      error.code === "OUTPUT_ARCHIVE_ENTRY_NAMES_TOTAL_LIMIT_EXCEEDED",
+  );
+});
+
+test("container entry-name preflight rejects unsafe and canonical duplicate output paths", () => {
+  for (const names of [
+    ["project.json", "images/CON.png"],
+    ["project.json", "images/name. "],
+    ["project.json", "images/a.png", "IMAGES/A.PNG"],
+  ]) {
+    assert.throws(
+      () => assertContainerArchiveEntryNames(names.length, names),
+      ContainerWriteError,
+    );
+  }
+});
+
 test("accepted project file counts fit every complete archive format", () => {
   assert.ok(
     containerArchiveEntryCount("vision", V2_PROJECT_LIMITS.maxFiles) <=
@@ -204,6 +239,14 @@ function browserFile(blob: Blob, name: string): File {
     [blob] as unknown as ConstructorParameters<typeof NodeFile>[0],
     name,
   ) as unknown as File;
+}
+
+function archiveNameOfExactUtf8Size(index: number, size: number): string {
+  const id = index.toString().padStart(5, "0");
+  const first = "a".repeat(255);
+  const secondLength = size - id.length - first.length - 2;
+  assert.ok(secondLength > 0 && secondLength <= 255);
+  return `${id}/${first}/${"b".repeat(secondLength)}`;
 }
 
 function project(): ProjectIR {
@@ -431,7 +474,7 @@ test("SVPA container emits compatible manifest, project, images, readme and help
     assert.equal(archive.has("一键修复并打开项目.exe"), true);
     const manifest = JSON.parse(await archive.readText("svpa_manifest.json"));
     assert.equal(manifest.Generator, "SaigeVision Project Converter");
-    assert.equal(manifest.GeneratorVersion, "0.0.2");
+    assert.equal(manifest.GeneratorVersion, APP_VERSION);
     assert.equal(manifest.ProjectFile, "项目/双向.srproj");
     assert.equal(manifest.OriginalProjectDirectory, "C:\\original\\project");
     assert.equal(manifest.Entries.length, 2);

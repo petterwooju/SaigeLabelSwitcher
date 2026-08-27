@@ -355,6 +355,73 @@ test("V1 srproj -> vision repairs a verified image extension without re-encoding
   }
 });
 
+test("V1 srproj -> vision adds a verified missing image extension and round-trips", async () => {
+  const fixture = parseFixture();
+  const originalPath = String.raw`C:\source\108`;
+  const source: ProjectIR = {
+    ...fixture,
+    files: [{
+      ...fixture.files[0]!,
+      sourcePath: originalPath,
+      normalizedPath: "C:/source/108",
+      fileName: "108",
+      width: 12,
+      height: 9,
+      image: { kind: "external", path: originalPath },
+    }],
+  };
+  const bytes = jpeg(12, 9);
+  const blobBytes = new Uint8Array(bytes.byteLength);
+  blobBytes.set(bytes);
+  const verified = await verifyAndEnrichProjectImages(
+    source,
+    [{
+      fileIndex: source.files[0]!.index,
+      originalPath,
+      source: {
+        kind: "blob",
+        blob: new Blob([blobBytes.buffer], { type: "image/jpeg" }),
+        relativePath: "selected/source/108",
+      },
+    }],
+    { repairMismatchedExtensions: true },
+  );
+  assert.equal(verified.complete, true);
+  assert.equal(
+    verified.extensionRepairs[0]?.outputRelativePath,
+    "selected/source/108.jpg",
+  );
+
+  const built = writeV2VisionProject(verified.project, {
+    imageOutputPaths: Object.fromEntries(
+      verified.extensionRepairs.map((item) => [item.fileIndex, item.outputRelativePath]),
+    ),
+  });
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  const handle = new MemorySaveHandle();
+  await writeVisionArchive({
+    destination: { fileName: built.fileName, handle },
+    built,
+    images: verified.resolvedImages,
+  });
+
+  const loaded = await loadProject(browserFile([handle.blob()], built.fileName));
+  try {
+    assert.equal(loaded.parseResult.ok, true);
+    assert.equal(loaded.project?.files[0]?.sourcePath, "images/selected/source/108.jpg");
+    assert.ok(loaded.project && loaded.archive);
+    const resolved = resolveProjectImages(loaded.project, loaded.archive);
+    const reverified = await verifyAndEnrichProjectImages(
+      loaded.project,
+      resolved.images,
+    );
+    assert.equal(reverified.complete, true);
+  } finally {
+    await loaded.close();
+  }
+});
+
 test("V1 srproj and V2 subvision repair mismatched extensions in SVPA output", async () => {
   const fixture = parseFixture();
   const originalPath = String.raw`C:\source\108.bmp`;

@@ -6,9 +6,15 @@
  * validator below.
  */
 
+import {
+  ARCHIVE_ENTRY_SEGMENT_MAX_BYTES,
+  exceedsUtf8ByteLimit,
+} from "./resourceLimits.ts";
+
 const WINDOWS_DRIVE_PREFIX = /^[a-z]:/iu;
 const WINDOWS_FORBIDDEN_CHARACTERS = /[<>:"|?*]/u;
-const WINDOWS_RESERVED_BASENAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
+const WINDOWS_RESERVED_BASENAME =
+  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:[ .].*)?$/iu;
 
 export type UnsafeZipEntryReason =
   | "empty"
@@ -17,7 +23,8 @@ export type UnsafeZipEntryReason =
   | "drive-path"
   | "traversal"
   | "invalid-character"
-  | "reserved-name";
+  | "reserved-name"
+  | "segment-too-long";
 
 export type ZipEntryPathValidation =
   | { safe: true; normalizedPath: string }
@@ -87,13 +94,15 @@ export function trailingPathSegmentScore(
  * treated as separators so `..\\file` cannot bypass traversal checks.
  */
 export function validateZipEntryPath(value: string): ZipEntryPathValidation {
-  const trimmed = value.trim().normalize("NFC");
-  if (!trimmed) return { safe: false, reason: "empty" };
-  if (hasControlCharacters(trimmed)) {
+  const normalized = value.normalize("NFC");
+  if (!normalized || normalized.trim() === "") {
+    return { safe: false, reason: "empty" };
+  }
+  if (hasControlCharacters(normalized)) {
     return { safe: false, reason: "control-character" };
   }
 
-  const slashPath = trimmed.replace(/\\/gu, "/");
+  const slashPath = normalized.replace(/\\/gu, "/");
   if (slashPath.startsWith("/") || slashPath.startsWith("//")) {
     return { safe: false, reason: "absolute" };
   }
@@ -118,6 +127,13 @@ export function validateZipEntryPath(value: string): ZipEntryPathValidation {
   }
   if (segments.some((segment) => WINDOWS_RESERVED_BASENAME.test(segment))) {
     return { safe: false, reason: "reserved-name" };
+  }
+  if (
+    segments.some((segment) =>
+      exceedsUtf8ByteLimit(segment, ARCHIVE_ENTRY_SEGMENT_MAX_BYTES),
+    )
+  ) {
+    return { safe: false, reason: "segment-too-long" };
   }
 
   return { safe: true, normalizedPath: segments.join("/") };

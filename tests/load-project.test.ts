@@ -270,6 +270,22 @@ test("loads vision ZIP without inflating image bytes", async () => {
   assert.equal(loaded.archive.has("images/ok.png"), false);
 });
 
+test("loads a vision archive whose root project uses an uppercase JSON suffix", async () => {
+  const json = v2Project("images/ok.png");
+  const zip = await makeZip([
+    ["PROJECT.JSON", json],
+    ["images/ok.png", "not-decoded-image-bytes"],
+  ]);
+  const loaded = await loadProject(browserFile([zip], "uppercase.visionproj"));
+  try {
+    assert.equal(loaded.format, "v2-visionproj");
+    assert.equal(loaded.parseResult.ok, true);
+    assert.equal(loaded.projectJsonText, json);
+  } finally {
+    await loaded.close();
+  }
+});
+
 test("does not mistake a V2 project JSON named svpa_manifest for an SVPA package", async () => {
   const root = JSON.parse(v2Project("images/ok.png")) as {
     project: { projectName: string };

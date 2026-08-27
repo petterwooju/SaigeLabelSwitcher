@@ -258,11 +258,10 @@ export async function verifyAndEnrichProjectImages(
         if (!issue) {
           const formatIssue = validateDetectedFormat(file, resolved.source, detected);
           const repair =
-            formatIssue &&
             options.repairMismatchedExtensions
               ? extensionRepair(file, resolved, detected)
               : undefined;
-          if (!repair) issue = formatIssue;
+          if (formatIssue && !repair) issue = formatIssue;
           issue ??= validateDeclaredDimensions(file, detected);
           if (!issue && repair) {
             extensionRepairs.push(repair);
@@ -333,7 +332,7 @@ function extensionRepair(
   detected: Dimensions,
 ): ImageExtensionRepair | undefined {
   const declaredFormat = extensionFormatForSource(file, resolved.source);
-  if (declaredFormat === undefined || declaredFormat === detected.format) {
+  if (declaredFormat === detected.format) {
     return undefined;
   }
   const sourceRelativePath = resolved.source.relativePath || file.fileName;

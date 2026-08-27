@@ -6,6 +6,12 @@
 - ZIP、XML、JSON、路径、数量、深度、解压后字节数及图片尺寸均有门禁；完整输出使用可取消的流式读写。
 - SVPA 路径修复助手在打包前固定校验大小与 SHA-256，应用不会执行输入包中的程序。
 
+## 托管安全头边界
+
+正式生产站点由 GitHub Pages 提供。GitHub Pages 不支持仓库为静态响应配置任意 HTTP 安全头，因此当前不能在托管层强制 HSTS、`X-Content-Type-Options` 或完整的响应头 CSP。应用输出的 CSP `meta` 与 Referrer Policy 只能提供浏览器侧的有限补充，不能宣称等同于 HTTP 响应安全头。
+
+需要服务器级安全头时，必须先评审并迁移到能够控制响应头的托管服务；`.openai/hosting.json` 对应的 Sites 环境仅为可能落后于 `main` 的陈旧备用环境，不是正式发布或验收来源。
+
 ## 上游 image-size 安全补丁
 
 截至 2026-08-14，`vinext@1.0.0-beta.2` 原本固定依赖 `image-size@2.0.2`。GitHub 的两个高危拒绝服务公告覆盖该版本，且都明确标注“无已修复版本”：
@@ -34,7 +40,7 @@
 
 ## 仍需发布凭据处理的事项
 
-`public/downloads/SaigeVisionProjectAssistant.ZipFixer.exe` 当前没有 Authenticode 签名，本机也没有可用的组织代码签名证书。v0.0.2 公开 beta 与公开源码仓库暂以固定 SHA-256 提供评估版本；哈希只能证明字节与仓库发布物一致，不能证明发布者身份，Windows 或企业策略可能阻止运行。不得引导用户绕过 SmartScreen 或企业策略。
+`public/downloads/SaigeVisionProjectAssistant.ZipFixer.exe` 当前没有 Authenticode 签名，本机也没有可用的组织代码签名证书。v0.0.3 公开 beta 与公开源码仓库暂以固定 SHA-256 提供评估版本；哈希只能证明字节与仓库发布物一致，不能证明发布者身份，Windows 或企业策略可能阻止运行。不得引导用户绕过 SmartScreen 或企业策略。
 
 进入稳定版或企业分发前必须：
 
@@ -44,3 +50,5 @@
 4. 在 Windows CI 中验证签名发布者与时间戳。
 
 不得引导用户绕过 SmartScreen 或企业安全策略。
+
+上述组织签名与可信时间戳是稳定版和企业分发的发布阻断项，而不是普通转换流程中的可操作错误；保持在发布门禁和文档中，不重新显示为页面警告。

@@ -43,7 +43,7 @@ const CLASS_COLORS = [
 ] as const;
 
 const WINDOWS_RESERVED_BASENAME =
-  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
+  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:[ .].*)?$/iu;
 
 type MutableJsonValue =
   | string

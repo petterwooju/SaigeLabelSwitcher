@@ -337,6 +337,52 @@ test("repairs a verified extension mismatch for complete-output preparation", as
   }
 });
 
+test("adds a verified extension when a complete output image has none or an unknown suffix", async () => {
+  const bytes = jpeg(12, 9);
+  const files = [
+    {
+      ...file(0, { width: 12, height: 9 }),
+      fileName: "camera-frame",
+      sourcePath: "C:/images/camera-frame",
+      normalizedPath: "C:/images/camera-frame",
+      image: { kind: "external" as const, path: "C:/images/camera-frame" },
+    },
+    {
+      ...file(1, { width: 12, height: 9 }),
+      fileName: "camera-frame.raw",
+      sourcePath: "C:/images/camera-frame.raw",
+      normalizedPath: "C:/images/camera-frame.raw",
+      image: { kind: "external" as const, path: "C:/images/camera-frame.raw" },
+    },
+  ];
+  const resolved = files.map((item) => ({
+    fileIndex: item.index,
+    originalPath: item.sourcePath,
+    source: {
+      kind: "blob" as const,
+      blob: imageBlob(bytes, "image/jpeg"),
+      relativePath: item.fileName,
+    },
+  }));
+
+  const strict = await verifyAndEnrichProjectImages(project(files), resolved);
+  assert.equal(strict.complete, true);
+  assert.deepEqual(strict.extensionRepairs, []);
+
+  const repaired = await verifyAndEnrichProjectImages(project(files), resolved, {
+    repairMismatchedExtensions: true,
+  });
+  assert.equal(repaired.complete, true);
+  assert.deepEqual(
+    repaired.extensionRepairs.map((item) => item.outputRelativePath),
+    ["camera-frame.jpg", "camera-frame.jpg"],
+  );
+  assert.deepEqual(
+    repaired.resolvedImages.map((item) => item.source.relativePath),
+    ["camera-frame.jpg", "camera-frame.jpg"],
+  );
+});
+
 test("does not treat a MIME-only disagreement as a repairable extension mismatch", async () => {
   const sourceFile: ProjectFileIR = {
     ...file(0, { width: 12, height: 9 }),
